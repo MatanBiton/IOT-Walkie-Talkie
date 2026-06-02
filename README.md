@@ -1,4 +1,4 @@
-## XXXXX Project by :  
+## Walkie-Talki Project by : Group 14  
   
 ## Details about the project
  
