@@ -1,0 +1,98 @@
+ESP32 Project Hardware Connections
+===================================
+
+Current existing connections should remain unchanged.
+
+1. Existing Main Button
+-----------------------
+ESP32 GPIO14 -> button -> GND
+
+Code note:
+- Configure GPIO14 as INPUT_PULLUP.
+- Button is active-low:
+  pressed = LOW
+  released = HIGH
+
+
+2. Recording LED
+----------------
+ESP32 GPIO4 -> resistor -> long LED leg / anode
+short LED leg / cathode -> GND
+
+Code note:
+- Configure GPIO4 as OUTPUT.
+
+
+3. I2S Microphone
+-----------------
+Mic VCC / VDD  -> ESP32 3.3V
+Mic GND        -> ESP32 GND
+Mic SCK / BCLK -> ESP32 GPIO32
+Mic WS / LRCLK -> ESP32 GPIO25
+Mic SD / DOUT  -> ESP32 GPIO33
+
+
+4. I2S Speaker Amplifier
+------------------------
+ESP32 GPIO27 -> amplifier BCLK / BCK
+ESP32 GPIO26 -> amplifier LRC / WS
+ESP32 GPIO22 -> amplifier DIN / DATA
+ESP32 GND    -> amplifier GND
+ESP32 5V/VIN -> amplifier VIN / VCC
+
+
+5. OLED Display - 0.96 inch 128x64 SSD1306
+------------------------------------------
+Assumed interface: I2C, 4-pin OLED module.
+
+OLED VCC -> ESP32 3.3V
+OLED GND -> ESP32 GND
+OLED SDA -> ESP32 GPIO21
+OLED SCL -> ESP32 GPIO19
+
+
+6. GUI Button 1 (Left)
+--------------------------
+ESP32 GPIO18 -> button -> GND
+
+Code note:
+- Configure GPIO18 as INPUT_PULLUP.
+- Button is active-low:
+  pressed = LOW
+  released = HIGH
+
+
+7. GUI Button 2 (rIGHT)
+--------------------------
+ESP32 GPIO23 -> button -> GND
+
+Code note:
+- Configure GPIO23 as INPUT_PULLUP.
+- Button is active-low:
+  pressed = LOW
+  released = HIGH
+
+
+Final GPIO Usage Summary
+========================
+
+GPIO4  - Recording LED
+GPIO14 - Existing main button
+GPIO18 - GUI button 1
+GPIO19 - OLED SCL
+GPIO21 - OLED SDA
+GPIO22 - I2S speaker amplifier DIN / DATA
+GPIO23 - GUI button 2
+GPIO25 - I2S microphone WS / LRCLK
+GPIO26 - I2S speaker amplifier LRC / WS
+GPIO27 - I2S speaker amplifier BCLK / BCK
+GPIO32 - I2S microphone SCK / BCLK
+GPIO33 - I2S microphone SD / DOUT
+
+
+Reserved / Avoided Pins
+=======================
+
+GPIO22 is not used for OLED SCL because it is already assigned to the speaker amplifier data line.
+
+Avoid GPIO0, GPIO2, GPIO12, and GPIO15 unless necessary, because they may affect ESP32 boot behavior depending on the board and external circuitry.
