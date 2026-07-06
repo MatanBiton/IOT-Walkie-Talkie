@@ -5,39 +5,53 @@
 /*
  * Display GUI module.
  *
- * Current behavior:
- *   - Left GUI button  : scroll through main menu options.
- *   - Right GUI button : select the highlighted option.
- *   - In a placeholder screen, left returns to the main menu.
+ * Controls:
+ * - Main menu:
+ *   - Left GUI button  : scroll through menu options
+ *   - Right GUI button : open highlighted screen
  *
- * Later integration:
- *   - Keep AppGui as the navigation owner.
- *   - Replace placeholder screens with real screen modules.
- *   - Use UpdateResult.selectedScreen in main.cpp/main.ino to trigger
- *     channel/user/statistics/settings logic.
+ * - Channel screen:
+ *   - Left GUI button  : scroll through channels
+ *   - Right GUI button : select/join highlighted channel
+ *
+ * Current channel behavior:
+ * - Shows 10 channels.
+ * - Shows static VOIP/P2P usage counters near each channel.
+ * - Selecting a channel only opens a temporary placeholder screen.
  */
 
 namespace Gui {
+
+constexpr uint8_t CHANNEL_COUNT = 10;
 
 enum class ScreenId : uint8_t {
   MainMenu = 0,
   SelectChannels,
   ViewUsers,
   ViewStatistics,
-  ViewSettings
+  ViewSettings,
+  ChannelJoinPreview
+};
+
+struct ChannelStats {
+  uint8_t channelNumber;
+  uint8_t voipUsers;
+  uint8_t p2pUsers;
 };
 
 struct UpdateResult {
   bool hasSelection = false;
   ScreenId selectedScreen = ScreenId::MainMenu;
+
+  bool hasChannelSelection = false;
+  uint8_t selectedChannel = 0;
 };
 
 class AppGui {
-public:
+ public:
   bool begin();
 
   // Call once per loop().
-  // Returns hasSelection=true only on a new menu selection event.
   UpdateResult update();
 
   void showMainMenu();
@@ -45,19 +59,36 @@ public:
 
   ScreenId activeScreen() const;
   uint8_t highlightedIndex() const;
+  uint8_t highlightedChannel() const;
+  uint8_t selectedChannel() const;
 
-private:
+  // Future Firebase/RTDB integration point.
+  // For now the GUI uses static values initialized in gui.cpp.
+  void setChannelStats(uint8_t channelNumber, uint8_t voipUsers, uint8_t p2pUsers);
+
+ private:
   void render();
   void renderMainMenu();
+  void renderChannelList();
+  void renderChannelJoinPreview();
   void renderPlaceholder();
 
-  void scrollNext();
-  UpdateResult selectCurrent();
+  void scrollNextMainMenuItem();
+  void scrollNextChannel();
+
+  UpdateResult selectCurrentMainMenuItem();
+  UpdateResult selectCurrentChannel();
+
+  void showChannelList();
 
   const char* screenTitle(ScreenId screen) const;
 
   ScreenId activeScreen_ = ScreenId::MainMenu;
+
   uint8_t highlightedIndex_ = 0;
+  uint8_t highlightedChannelIndex_ = 0;
+  uint8_t selectedChannelIndex_ = 0;
+
   bool needsRedraw_ = true;
 };
 

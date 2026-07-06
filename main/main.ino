@@ -7,6 +7,7 @@ void setup() {
 
   if (!Gui::appGui.begin()) {
     Serial.println("[ERROR] OLED display initialization failed");
+
     while (true) {
       delay(1000);
     }
@@ -21,8 +22,7 @@ void loop() {
   if (guiResult.hasSelection) {
     switch (guiResult.selectedScreen) {
       case Gui::ScreenId::SelectChannels:
-        Serial.println("[GUI] Selected: Select channels");
-        // TODO: connect to channel-selection screen/controller.
+        Serial.println("[GUI] Opened: Select channels");
         break;
 
       case Gui::ScreenId::ViewUsers:
@@ -41,8 +41,15 @@ void loop() {
         break;
 
       case Gui::ScreenId::MainMenu:
+      case Gui::ScreenId::ChannelJoinPreview:
       default:
         break;
     }
+  }
+
+  if (guiResult.hasChannelSelection) {
+    Serial.print("[GUI] Selected channel ");
+    Serial.print(guiResult.selectedChannel);
+    Serial.println(" - join action is not implemented yet");
   }
 }
