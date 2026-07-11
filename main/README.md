@@ -1,87 +1,125 @@
-# RTDB Audio Buffered Batch Patch
+# View Users + synchronized background availability patch (fixed ESP-NOW channel policy)
 
-This version keeps the one-directional model:
+This patch adds a low-priority background availability service plus a real `View users` screen.
+It is applied from the original project state, not on top of an older patch.
 
-- Talker ESP records while `Pins::MAIN_BUTTON` is held.
-- Listener ESP continuously streams RTDB and plays received PCM chunks.
+## What changed
 
-## Main fix in this patch
+- Added `availability_service.h/.cpp`.
+- `main.ino` starts the availability service for both Talker and Listener roles.
+- `gui.cpp/.h` now render `View users` instead of the old placeholder.
+- `app_config.h` now has per-device user identity plus availability timing configuration.
+- P2P ESP-NOW discovery now uses synchronized epoch-time windows instead of `millis()` since boot, so ESPs that start at different times do not permanently miss each other.
+- ESP-NOW presence uses the current Wi-Fi/AP channel, not a separate physical channel. This avoids `Peer channel is not equal to the home channel` errors while the ESP is connected to Wi-Fi/RTDB.
 
-The previous async version still uploaded one chunk per HTTPS request. If a 200 ms audio chunk takes longer than 200 ms to upload, the upload queue eventually fills and chunks are dropped.
+## RTDB VOIP availability
 
-This patch changes the upload side to:
-
-```text
-recording loop -> FreeRTOS queue -> upload task -> RTDB PATCH batch
-```
-
-Instead of uploading:
-
-```text
-PUT /chunks/00000000
-PUT /chunks/00000001
-PUT /chunks/00000002
-```
-
-it uploads several children in one request:
+Each ESP periodically writes its own heartbeat to:
 
 ```text
-PATCH /chunks
-{
-  "00000000": { ... },
-  "00000001": { ... },
-  "00000002": { ... }
-}
+/statistics/users/user_<id>
 ```
 
-This reduces TLS/HTTP overhead and should produce about 25 chunks for a 5 second recording at 200 ms per chunk.
+For example, user `01` writes to:
 
-## Important config
+```text
+/statistics/users/user_01
+```
 
-In `app_config.h`:
+The heartbeat includes:
+
+- `userId`
+- `deviceId`
+- `roomId`
+- `lastSeenServerMs` using Firebase server timestamp
+- `deviceEpochMs` from the ESP clock after NTP sync
+- `uptimeMs`
+- `periodMs`
+- `timezone`
+- `tz`
+- `localTime`
+
+Every ESP also reads `/statistics/users` and marks a VOIP user unavailable when the last server timestamp is older than:
+
+```text
+AvailabilityConfig::PERIOD_TIME_MS * 1.1
+```
+
+Default period is 5000 ms, so the VOIP offline threshold is 5500 ms.
+
+## Synchronized P2P availability
+
+Each ESP broadcasts a compact ESP-NOW presence packet with its user number during a shared statistics window.
+The shared window is based on wall-clock epoch time:
 
 ```cpp
-constexpr uint8_t TX_QUEUE_LENGTH = 24;
-constexpr uint8_t UPLOAD_BATCH_MAX_CHUNKS = 6;
-constexpr uint8_t UPLOAD_MAX_ATTEMPTS = 2;
+inWindow = (epochMs % AvailabilityConfig::PERIOD_TIME_MS) <
+           AvailabilityConfig::P2P_STATS_SYNC_WINDOW_MS;
 ```
 
-For a 5 second test, expected chunk count is roughly:
+Because this uses NTP-synchronized epoch time instead of `millis()` since boot, user `01` and user `02` enter the stats window at the same global time even if they booted at different moments.
+
+Important ESP32 Wi-Fi/ESP-NOW constraint: while the ESP is connected to a Wi-Fi router, the radio is homed to the router/AP channel. ESP-NOW sends must use that same physical channel. Configuring a different peer channel causes logs like:
 
 ```text
-5000 ms / 200 ms = 25 chunks
+ESPNOW: Peer channel is not equal to the home channel, send fail!
 ```
 
-A queue length of 24 plus the currently-uploading batch should be enough for that test unless the ESP runs out of heap or Wi-Fi stalls badly.
+Therefore this patch does **not** switch to a separate physical stats channel. It keeps ESP-NOW on the current Wi-Fi channel and separates traffic using:
 
-## Logs to check
+- a dedicated packet magic/version
+- `P2P_STATS_LOGICAL_CHANNEL` inside the packet
+- synchronized stats windows
+- repeated short beacons
+- per-user transmit offsets
 
-Good recording should show many enqueue lines:
+Relevant defaults:
+
+```cpp
+AvailabilityConfig::P2P_ESPNOW_CURRENT_WIFI_CHANNEL = 0; // current AP/home channel
+AvailabilityConfig::P2P_STATS_LOGICAL_CHANNEL = 250;
+AvailabilityConfig::P2P_STATS_SYNC_WINDOW_MS = 300;
+AvailabilityConfig::P2P_STATS_BROADCAST_REPEATS = 3;
+AvailabilityConfig::P2P_STATS_BROADCAST_GAP_MS = 35;
+AvailabilityConfig::P2P_STATS_USER_TX_OFFSET_STEP_MS = 35;
+```
+
+The per-user offset spreads transmissions inside the same window. For example, user `01` transmits around 35 ms into the window, user `02` around 70 ms, and so on.
+
+P2P availability is intentionally less strict than VOIP availability. It is marked unavailable only after several missed synchronized windows:
+
+```cpp
+AvailabilityConfig::P2P_OFFLINE_AFTER_MISSED_PERIODS = 3;
+```
+
+This prevents the GUI from flickering when one ESP-NOW packet is lost.
+
+All ESPs that should discover each other over ESP-NOW must be on the same Wi-Fi/AP channel. The easiest way is to connect them to the same router/hotspot.
+
+## Device setup
+
+Before uploading to each ESP, change these in `app_config.h`:
+
+```cpp
+constexpr const char* DEVICE_ID = "esp32-Talker-01";
+constexpr const char* USER_ID = "01";
+```
+
+Use IDs `01` through `05` for the five assumed users.
+
+## View users screen
+
+The screen displays five users:
 
 ```text
-[Talker][QUEUE_ENQUEUE_OK] ... seq=0
-[Talker][QUEUE_ENQUEUE_OK] ... seq=1
+U01 V:ON P:--
+U02 V:-- P:ON
 ...
-[Talker][QUEUE_ENQUEUE_OK] ... seq=24
 ```
 
-If chunks are dropped, you will see:
+- `V` = VOIP/RTDB availability
+- `P` = P2P/ESP-NOW availability
+- Left button returns to the main menu
+- Right button forces a redraw
 
-```text
-[Talker][QUEUE_FULL_DROP]
-```
-
-Batch upload should show:
-
-```text
-[Talker][UPLOAD_TASK_DEQUEUE_BATCH] ... count=6 firstSeq=...
-[Talker][BATCH_SEND_OK] ... count=6 firstSeq=... lastSeq=...
-```
-
-At startup, check free heap:
-
-```text
-[READY] RTDB buffered async talker initialized ... freeHeap=...
-```
-
-If queue creation fails or free heap is very low, reduce `TX_QUEUE_LENGTH` or `UPLOAD_BATCH_MAX_CHUNKS`.
+The GUI is updated from a small static snapshot every `AvailabilityConfig::GUI_REFRESH_MS` milliseconds. No dynamic list allocation or queues are used for availability state.

@@ -1,4 +1,5 @@
 #include "app_config.h"
+#include "availability_service.h"
 #include "audio_io.h"
 #include "consts.h"
 #include "gui.h"
@@ -14,6 +15,30 @@ namespace {
 
 int16_t pcmBuffer[AudioConfig::CHUNK_SAMPLES];
 unsigned long lastStreamReconnectAttemptMs = 0;
+AvailabilityService::UserStatus availabilitySnapshot[AvailabilityConfig::USER_COUNT];
+
+
+void syncAvailabilityToGui() {
+  static unsigned long lastRefreshMs = 0;
+  const unsigned long now = millis();
+  if ((now - lastRefreshMs) < AvailabilityConfig::GUI_REFRESH_MS) {
+    return;
+  }
+  lastRefreshMs = now;
+
+  const size_t count = AvailabilityService::copyUserStatuses(
+      availabilitySnapshot,
+      AvailabilityConfig::USER_COUNT);
+
+  for (size_t i = 0; i < count; ++i) {
+    Gui::appGui.setUserStatus(
+        availabilitySnapshot[i].userNumber,
+        availabilitySnapshot[i].voipAvailable,
+        availabilitySnapshot[i].p2pAvailable,
+        availabilitySnapshot[i].voipAgeSeconds,
+        availabilitySnapshot[i].p2pAgeSeconds);
+  }
+}
 
 // -----------------------------------------------------------------------------
 // Talker state
@@ -501,6 +526,11 @@ void setup() {
   Serial.println("[READY] GUI initialized");
 
   WifiConnection::begin();
+
+  if (!AvailabilityService::begin()) {
+    Serial.println("[Availability] Background availability task did not start");
+  }
+
   if (!RtdbAudioStream::begin()) {
     Serial.println("[RTDB] Initial RTDB setup failed; loop will keep trying where possible");
   }
@@ -518,6 +548,7 @@ void loop() {
 
   WifiConnection::ensureConnected();
   RtdbAudioStream::loopMaintenance();
+  syncAvailabilityToGui();
 
   if (AppConfig::ROLE == AppConfig::DeviceRole::Talker) {
     loopTalker();

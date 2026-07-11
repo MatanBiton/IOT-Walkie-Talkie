@@ -16,15 +16,19 @@ constexpr DeviceRole ROLE = DeviceRole::Talker;
 
 constexpr uint8_t DEFAULT_CHANNEL = 1;
 constexpr const char* ROOM_ID = "room1";
-constexpr const char* DEVICE_ID = "esp32-Talker-01";
+constexpr const char* DEVICE_ID = "esp32-Talker-02";
+
+// Logical project user id. Compile/upload the same code to each ESP after
+// changing only this value and DEVICE_ID, for example: "01" ... "05".
+constexpr const char* USER_ID = "02";
 
 }  // namespace AppConfig
 
 namespace WifiConfig {
 
 // Fill locally before uploading. Do not commit real Wi-Fi credentials.
-constexpr const char* SSID = "GalaxyA31948B";
-constexpr const char* PASSWORD = "enxu9794";
+constexpr const char* SSID = "Adi";
+constexpr const char* PASSWORD = "0502092099";
 
 constexpr unsigned long CONNECT_TIMEOUT_MS = 20000;
 constexpr unsigned long RECONNECT_INTERVAL_MS = 5000;
@@ -37,10 +41,76 @@ namespace FirebaseConfig {
 // This patch assumes permissive RTDB rules for the demo, so no Firebase Auth,
 // API key, email, or password are used.
 constexpr const char* DATABASE_URL =
-    "https://walki-talkie-37ed3-default-rtdb.europe-west1.firebasedatabase.app";
+    "https://walki-talkie-37ed3-default-rtdb.europe-west1.firebasedatabase.app/";
 
 }  // namespace FirebaseConfig
 
+
+namespace AvailabilityConfig {
+
+constexpr uint8_t USER_COUNT = 5;
+
+// Background availability period. The GUI marks a VOIP user offline when the
+// last RTDB heartbeat is older than PERIOD_TIME_MS * 1.1. P2P is intentionally
+// less strict: one missed ESP-NOW stats window should not make the GUI flicker.
+constexpr unsigned long PERIOD_TIME_MS = 5000;
+constexpr uint8_t VOIP_OFFLINE_THRESHOLD_NUMERATOR = 11;
+constexpr uint8_t VOIP_OFFLINE_THRESHOLD_DENOMINATOR = 10;
+constexpr uint8_t P2P_OFFLINE_AFTER_MISSED_PERIODS = 3;
+
+constexpr const char* RTDB_USERS_PATH = "/statistics/users";
+
+// Local time metadata written with every RTDB heartbeat. POSIX TZ format is used
+// by configTzTime(); the readable name is stored for display/debugging.
+constexpr const char* TIME_ZONE_NAME = "Asia/Jerusalem";
+constexpr const char* TIME_ZONE_POSIX = "IST-2IDT,M3.4.4/26,M10.5.0";
+
+constexpr const char* NTP_SERVER_1 = "pool.ntp.org";
+constexpr const char* NTP_SERVER_2 = "time.nist.gov";
+constexpr unsigned long TIME_SYNC_CHECK_MS = 30000;
+
+// ESP-NOW physical channel policy.
+//
+// Important ESP32 limitation: while the ESP is connected to a Wi-Fi router,
+// ESP-NOW must use the STA "home" channel, meaning the router/AP channel.
+// A separate physical stats channel causes send failures such as:
+//   ESPNOW: Peer channel is not equal to the home channel
+// and can also break HTTPS/RTDB by moving the radio away from the AP.
+//
+// Therefore this project keeps ESP-NOW presence on the current Wi-Fi channel
+// and separates traffic by packet type + synchronized time windows, not by
+// physical radio channel. Value 0 means "current Wi-Fi channel".
+constexpr uint8_t P2P_ESPNOW_CURRENT_WIFI_CHANNEL = 0;
+
+// Logical identifiers kept for future local P2P talk implementation. They are
+// not physical Wi-Fi channels while RTDB/Wi-Fi is active.
+constexpr uint8_t P2P_TALK_LOGICAL_CHANNEL = 1;
+constexpr uint8_t P2P_STATS_LOGICAL_CHANNEL = 250;
+
+// P2P stats windows are based on epoch time, not millis() since boot:
+//   inWindow = (epochMs % PERIOD_TIME_MS) < P2P_STATS_SYNC_WINDOW_MS
+// Therefore ESPs that boot at different times still hop to the stats channel
+// together after NTP time is available.
+constexpr uint16_t P2P_STATS_SYNC_WINDOW_MS = 300;
+constexpr uint8_t P2P_STATS_BROADCAST_REPEATS = 3;
+constexpr uint16_t P2P_STATS_BROADCAST_GAP_MS = 35;
+constexpr uint16_t P2P_STATS_USER_TX_OFFSET_STEP_MS = 35;
+
+constexpr uint16_t RTDB_HTTP_TIMEOUT_MS = 5000;
+constexpr int32_t RTDB_CONNECT_TIMEOUT_MS = 3000;
+constexpr uint8_t RTDB_REQUEST_MAX_ATTEMPTS = 2;
+constexpr unsigned long RTDB_RETRY_DELAY_MS = 250;
+
+constexpr uint32_t TASK_STACK_BYTES = 12288;
+constexpr uint8_t TASK_PRIORITY = 1;
+constexpr uint8_t TASK_CORE = 0;
+constexpr unsigned long TASK_SHORT_YIELD_MS = 20;
+constexpr unsigned long TASK_LOOP_DELAY_MS = 20;
+constexpr unsigned long GUI_REFRESH_MS = 500;
+
+constexpr bool LOG_AVAILABILITY = true;
+
+}  // namespace AvailabilityConfig
 
 namespace RtdbHttpConfig {
 
@@ -48,6 +118,8 @@ namespace RtdbHttpConfig {
 // PUT from freezing the push-to-talk loop for minutes.
 constexpr uint16_t HTTP_TIMEOUT_MS = 15000;
 constexpr int32_t CONNECT_TIMEOUT_MS = 8000;
+constexpr uint8_t CONTROL_REQUEST_MAX_ATTEMPTS = 3;
+constexpr unsigned long CONTROL_RETRY_DELAY_MS = 350;
 
 // Keep enabled while debugging RTDB audio. It prints one clear success/failure
 // line per uploaded audio packet and request-level timing/status details.

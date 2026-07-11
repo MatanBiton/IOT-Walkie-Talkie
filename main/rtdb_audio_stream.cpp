@@ -36,6 +36,23 @@ const char* boolText(bool value) {
   return value ? "true" : "false";
 }
 
+const char* httpErrorName(int code) {
+  switch (code) {
+    case HTTPC_ERROR_CONNECTION_REFUSED: return "CONNECTION_REFUSED";
+    case HTTPC_ERROR_SEND_HEADER_FAILED: return "SEND_HEADER_FAILED";
+    case HTTPC_ERROR_SEND_PAYLOAD_FAILED: return "SEND_PAYLOAD_FAILED";
+    case HTTPC_ERROR_NOT_CONNECTED: return "NOT_CONNECTED";
+    case HTTPC_ERROR_CONNECTION_LOST: return "CONNECTION_LOST";
+    case HTTPC_ERROR_NO_STREAM: return "NO_STREAM";
+    case HTTPC_ERROR_NO_HTTP_SERVER: return "NO_HTTP_SERVER";
+    case HTTPC_ERROR_TOO_LESS_RAM: return "TOO_LESS_RAM";
+    case HTTPC_ERROR_ENCODING: return "ENCODING";
+    case HTTPC_ERROR_STREAM_WRITE: return "STREAM_WRITE";
+    case HTTPC_ERROR_READ_TIMEOUT: return "READ_TIMEOUT";
+    default: return "HTTP_ERROR";
+  }
+}
+
 String trimCopy(String value) {
   value.trim();
   return value;
@@ -388,6 +405,7 @@ bool httpPutJson(const String& path, const String& json, bool silentWrite, const
 
   HTTPClient http;
   setHttpRedirectPolicy(http);
+  http.useHTTP10(true);  // Force connection close; avoids stale TLS reuse issues on ESP32.
   http.setTimeout(RtdbHttpConfig::HTTP_TIMEOUT_MS);
   http.setConnectTimeout(RtdbHttpConfig::CONNECT_TIMEOUT_MS);
 
@@ -412,6 +430,7 @@ bool httpPutJson(const String& path, const String& json, bool silentWrite, const
   }
 
   http.addHeader("Content-Type", "application/json");
+  http.addHeader("Connection", "close");
   const int code = http.PUT(json);
   String response;
   if (code < 200 || code >= 300) {
@@ -422,10 +441,11 @@ bool httpPutJson(const String& path, const String& json, bool silentWrite, const
   const unsigned long elapsedMs = millis() - startMs;
   if (code < 200 || code >= 300) {
     Serial.printf(
-        "[RTDB][%s] PUT failed path=%s http=%d durationMs=%lu payloadBytes=%u\n",
+        "[RTDB][%s] PUT failed path=%s http=%d err=%s durationMs=%lu payloadBytes=%u\n",
         label,
         path.c_str(),
         code,
+        httpErrorName(code),
         static_cast<unsigned long>(elapsedMs),
         static_cast<unsigned int>(json.length()));
     if (response.length() > 0) {
@@ -460,6 +480,7 @@ bool httpPatchJson(const String& path, const String& json, bool silentWrite, con
 
   HTTPClient http;
   setHttpRedirectPolicy(http);
+  http.useHTTP10(true);  // Force connection close; avoids stale TLS reuse issues on ESP32.
   http.setTimeout(RtdbHttpConfig::HTTP_TIMEOUT_MS);
   http.setConnectTimeout(RtdbHttpConfig::CONNECT_TIMEOUT_MS);
 
@@ -484,6 +505,7 @@ bool httpPatchJson(const String& path, const String& json, bool silentWrite, con
   }
 
   http.addHeader("Content-Type", "application/json");
+  http.addHeader("Connection", "close");
   const int code = http.sendRequest(
       "PATCH",
       reinterpret_cast<uint8_t*>(const_cast<char*>(json.c_str())),
@@ -497,10 +519,11 @@ bool httpPatchJson(const String& path, const String& json, bool silentWrite, con
   const unsigned long elapsedMs = millis() - startMs;
   if (code < 200 || code >= 300) {
     Serial.printf(
-        "[RTDB][%s] PATCH failed path=%s http=%d durationMs=%lu payloadBytes=%u\n",
+        "[RTDB][%s] PATCH failed path=%s http=%d err=%s durationMs=%lu payloadBytes=%u\n",
         label,
         path.c_str(),
         code,
+        httpErrorName(code),
         static_cast<unsigned long>(elapsedMs),
         static_cast<unsigned int>(json.length()));
     if (response.length() > 0) {
@@ -535,6 +558,7 @@ bool httpDeletePath(const String& path, bool silentWrite, const char* label) {
 
   HTTPClient http;
   setHttpRedirectPolicy(http);
+  http.useHTTP10(true);  // Force connection close; avoids stale TLS reuse issues on ESP32.
   http.setTimeout(RtdbHttpConfig::HTTP_TIMEOUT_MS);
   http.setConnectTimeout(RtdbHttpConfig::CONNECT_TIMEOUT_MS);
 
@@ -557,6 +581,7 @@ bool httpDeletePath(const String& path, bool silentWrite, const char* label) {
     return false;
   }
 
+  http.addHeader("Connection", "close");
   const int code = http.sendRequest("DELETE");
   String response;
   if (code < 200 || code >= 300) {
@@ -567,10 +592,11 @@ bool httpDeletePath(const String& path, bool silentWrite, const char* label) {
   const unsigned long elapsedMs = millis() - startMs;
   if (code < 200 || code >= 300) {
     Serial.printf(
-        "[RTDB][%s] DELETE failed path=%s http=%d durationMs=%lu\n",
+        "[RTDB][%s] DELETE failed path=%s http=%d err=%s durationMs=%lu\n",
         label,
         path.c_str(),
         code,
+        httpErrorName(code),
         static_cast<unsigned long>(elapsedMs));
     if (response.length() > 0) {
       Serial.print("[RTDB] Error response: ");
@@ -954,23 +980,43 @@ bool beginTransmission(uint8_t channel, const char* sessionId) {
     return false;
   }
 
-  // Clear the old buffered chunks when a new push-to-talk session starts.
-  // The listener ignores delete/null stream events and waits for new chunks.
-  httpDeletePath(chunksPath(channel), true, "SESSION_CLEAR");
+  // Start the session with one atomic RTDB PATCH instead of DELETE /chunks
+  // followed by PUT /meta. On ESP32/Firebase this is much more reliable because
+  // it avoids two immediate HTTPS handshakes at the beginning of push-to-talk.
+  // Setting "chunks": null clears the old buffer, and setting meta.active=true
+  // tells the listener that future /chunks events belong to a live session.
+  String patch;
+  patch.reserve(230);
+  patch += "{\"chunks\":null,\"meta\":{\"active\":true,\"sessionId\":\"";
+  patch += sessionId;
+  patch += "\",\"deviceId\":\"";
+  patch += AppConfig::DEVICE_ID;
+  patch += "\",\"sampleRate\":";
+  patch += AudioConfig::SAMPLE_RATE;
+  patch += ",\"chunkMs\":";
+  patch += AudioConfig::CHUNK_MS;
+  patch += "}}";
 
-  String meta;
-  meta.reserve(180);
-  meta += "{\"active\":true,\"sessionId\":\"";
-  meta += sessionId;
-  meta += "\",\"deviceId\":\"";
-  meta += AppConfig::DEVICE_ID;
-  meta += "\",\"sampleRate\":";
-  meta += AudioConfig::SAMPLE_RATE;
-  meta += ",\"chunkMs\":";
-  meta += AudioConfig::CHUNK_MS;
-  meta += "}";
+  bool ok = false;
+  for (uint8_t attempt = 1; attempt <= RtdbHttpConfig::CONTROL_REQUEST_MAX_ATTEMPTS; ++attempt) {
+    Serial.printf(
+        "[RTDB][SESSION_START] PATCH attempt=%u/%u path=%s session=%s\n",
+        static_cast<unsigned int>(attempt),
+        static_cast<unsigned int>(RtdbHttpConfig::CONTROL_REQUEST_MAX_ATTEMPTS),
+        livePath(channel).c_str(),
+        sessionId);
 
-  const bool ok = httpPutJson(metadataPath(channel), meta, true, "SESSION_META");
+    ok = httpPatchJson(livePath(channel), patch, true, "SESSION_START");
+    if (ok) {
+      break;
+    }
+
+    if (attempt < RtdbHttpConfig::CONTROL_REQUEST_MAX_ATTEMPTS) {
+      delay(RtdbHttpConfig::CONTROL_RETRY_DELAY_MS);
+      WifiConnection::ensureConnected();
+    }
+  }
+
   if (ok) {
     Serial.print("[RTDB] Started session ");
     Serial.println(sessionId);
@@ -983,21 +1029,43 @@ bool endTransmission(uint8_t channel, const char* sessionId, uint32_t lastSeqInS
     return false;
   }
 
-  String meta;
-  meta.reserve(180);
-  meta += "{\"active\":false,\"sessionId\":\"";
-  meta += sessionId;
-  meta += "\",\"deviceId\":\"";
-  meta += AppConfig::DEVICE_ID;
-  meta += "\",\"lastSeq\":";
-  meta += lastSeqInSession;
-  meta += ",\"sampleRate\":";
-  meta += AudioConfig::SAMPLE_RATE;
-  meta += ",\"chunkMs\":";
-  meta += AudioConfig::CHUNK_MS;
-  meta += "}";
+  // Update only /meta inside /live. This keeps the chunks buffer intact and
+  // marks the session complete after the upload task flushed queued audio.
+  String patch;
+  patch.reserve(210);
+  patch += "{\"meta\":{\"active\":false,\"sessionId\":\"";
+  patch += sessionId;
+  patch += "\",\"deviceId\":\"";
+  patch += AppConfig::DEVICE_ID;
+  patch += "\",\"lastSeq\":";
+  patch += lastSeqInSession;
+  patch += ",\"sampleRate\":";
+  patch += AudioConfig::SAMPLE_RATE;
+  patch += ",\"chunkMs\":";
+  patch += AudioConfig::CHUNK_MS;
+  patch += "}}";
 
-  const bool ok = httpPutJson(metadataPath(channel), meta, true, "SESSION_META");
+  bool ok = false;
+  for (uint8_t attempt = 1; attempt <= RtdbHttpConfig::CONTROL_REQUEST_MAX_ATTEMPTS; ++attempt) {
+    Serial.printf(
+        "[RTDB][SESSION_END] PATCH attempt=%u/%u path=%s session=%s lastSeq=%lu\n",
+        static_cast<unsigned int>(attempt),
+        static_cast<unsigned int>(RtdbHttpConfig::CONTROL_REQUEST_MAX_ATTEMPTS),
+        livePath(channel).c_str(),
+        sessionId,
+        static_cast<unsigned long>(lastSeqInSession));
+
+    ok = httpPatchJson(livePath(channel), patch, true, "SESSION_END");
+    if (ok) {
+      break;
+    }
+
+    if (attempt < RtdbHttpConfig::CONTROL_REQUEST_MAX_ATTEMPTS) {
+      delay(RtdbHttpConfig::CONTROL_RETRY_DELAY_MS);
+      WifiConnection::ensureConnected();
+    }
+  }
+
   if (ok) {
     Serial.print("[RTDB] Ended session ");
     Serial.println(sessionId);

@@ -23,6 +23,7 @@
 namespace Gui {
 
 constexpr uint8_t CHANNEL_COUNT = 10;
+constexpr uint8_t USER_COUNT = 5;
 
 enum class ScreenId : uint8_t {
   MainMenu = 0,
@@ -37,6 +38,14 @@ struct ChannelStats {
   uint8_t channelNumber;
   uint8_t voipUsers;
   uint8_t p2pUsers;
+};
+
+struct UserStatus {
+  uint8_t userNumber;
+  bool voipAvailable;
+  bool p2pAvailable;
+  uint32_t voipAgeSeconds;
+  uint32_t p2pAgeSeconds;
 };
 
 struct UpdateResult {
@@ -63,14 +72,23 @@ class AppGui {
   uint8_t selectedChannel() const;
 
   // Future Firebase/RTDB integration point.
-  // For now the GUI uses static values initialized in gui.cpp.
+  // For now the channel GUI uses static values initialized in gui.cpp.
   void setChannelStats(uint8_t channelNumber, uint8_t voipUsers, uint8_t p2pUsers);
+
+  // Live user availability. Updated from the background availability task.
+  void setUserStatus(
+      uint8_t userNumber,
+      bool voipAvailable,
+      bool p2pAvailable,
+      uint32_t voipAgeSeconds,
+      uint32_t p2pAgeSeconds);
 
  private:
   void render();
   void renderMainMenu();
   void renderChannelList();
   void renderChannelJoinPreview();
+  void renderViewUsers();
   void renderPlaceholder();
 
   void scrollNextMainMenuItem();

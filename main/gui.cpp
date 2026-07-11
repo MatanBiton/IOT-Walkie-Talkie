@@ -97,6 +97,14 @@ Gui::ChannelStats channelStats[Gui::CHANNEL_COUNT] = {
   {10, 0, 1},
 };
 
+Gui::UserStatus userStats[Gui::USER_COUNT] = {
+  {1, false, false, 0xffffffffUL, 0xffffffffUL},
+  {2, false, false, 0xffffffffUL, 0xffffffffUL},
+  {3, false, false, 0xffffffffUL, 0xffffffffUL},
+  {4, false, false, 0xffffffffUL, 0xffffffffUL},
+  {5, false, false, 0xffffffffUL, 0xffffffffUL},
+};
+
 void drawHeader(const char* title) {
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -136,6 +144,10 @@ void printTwoDigit(uint8_t value) {
     display.print('0');
   }
   display.print(value);
+}
+
+void printAvailability(bool available) {
+  display.print(available ? "ON" : "--");
 }
 
 }  // namespace
@@ -202,6 +214,14 @@ UpdateResult AppGui::update() {
       break;
 
     case ScreenId::ViewUsers:
+      if (leftPressed) {
+        showMainMenu();
+      }
+      if (rightPressed) {
+        needsRedraw_ = true;
+      }
+      break;
+
     case ScreenId::ViewStatistics:
     case ScreenId::ViewSettings:
     default:
@@ -269,6 +289,36 @@ void AppGui::setChannelStats(
   }
 }
 
+void AppGui::setUserStatus(
+    uint8_t userNumber,
+    bool voipAvailable,
+    bool p2pAvailable,
+    uint32_t voipAgeSeconds,
+    uint32_t p2pAgeSeconds) {
+  if (userNumber < 1 || userNumber > USER_COUNT) {
+    return;
+  }
+
+  const uint8_t index = userNumber - 1;
+  Gui::UserStatus& status = userStats[index];
+
+  const bool changed =
+      status.voipAvailable != voipAvailable ||
+      status.p2pAvailable != p2pAvailable ||
+      status.voipAgeSeconds != voipAgeSeconds ||
+      status.p2pAgeSeconds != p2pAgeSeconds;
+
+  status.userNumber = userNumber;
+  status.voipAvailable = voipAvailable;
+  status.p2pAvailable = p2pAvailable;
+  status.voipAgeSeconds = voipAgeSeconds;
+  status.p2pAgeSeconds = p2pAgeSeconds;
+
+  if (changed && activeScreen_ == ScreenId::ViewUsers) {
+    needsRedraw_ = true;
+  }
+}
+
 void AppGui::scrollNextMainMenuItem() {
   highlightedIndex_ = (highlightedIndex_ + 1) % MAIN_MENU_COUNT;
   needsRedraw_ = true;
@@ -322,6 +372,9 @@ void AppGui::render() {
       break;
 
     case ScreenId::ViewUsers:
+      renderViewUsers();
+      break;
+
     case ScreenId::ViewStatistics:
     case ScreenId::ViewSettings:
     default:
@@ -410,6 +463,32 @@ void AppGui::renderChannelJoinPreview() {
   display.print(stats.p2pUsers);
 
   drawFooter("Back", "Menu");
+}
+
+void AppGui::renderViewUsers() {
+  drawHeader("View users");
+
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  for (uint8_t i = 0; i < USER_COUNT; ++i) {
+    const Gui::UserStatus& status = userStats[i];
+    const int y = 14 + i * 8;
+
+    display.setCursor(0, y);
+    display.print("U");
+    printTwoDigit(status.userNumber);
+
+    display.setCursor(26, y);
+    display.print("V:");
+    printAvailability(status.voipAvailable);
+
+    display.setCursor(67, y);
+    display.print("P:");
+    printAvailability(status.p2pAvailable);
+  }
+
+  drawFooter("Back", "Refresh");
 }
 
 void AppGui::renderPlaceholder() {
