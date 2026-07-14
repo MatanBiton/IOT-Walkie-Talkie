@@ -43,9 +43,12 @@ encoded.
 - `SESSION_START` is processed before queued audio and authorizes only the
   matching channel/session.
 - Microphone PCM is stored in ten fixed blocks; the FreeRTOS queue contains only
-  block indices.
+  block indices. If the network stalls, the oldest queued block is replaced by
+  the newest microphone audio so RAM stays bounded and live speech stays current.
 - Audio JSON is assembled in one fixed static buffer.
 - One persistent HTTPS connection is reused for all chunks in a PTT session.
+- Transient upload failures do not terminate a held PTT session; the uploader
+  closes the bad socket and continues with newer queued audio.
 - The persistent audio connection is closed before `SESSION_END`.
 - Completed chunk nodes are deleted at session end so SSE reconnect snapshots
   stay small.
@@ -71,7 +74,7 @@ reservation are not started.
 
 Do not enable Availability until its earlier crash has been diagnosed separately.
 
-## First V4 flash
+## First V5 flash
 
 Delete the existing test subtree once before the first V4 test so stale chunk
 history from older firmware does not appear in the initial SSE snapshot:
@@ -82,4 +85,5 @@ history from older firmware does not appear in the initial SSE snapshot:
 
 Then flash both boards with different `DEVICE_ID` and `USER_ID` values.
 
-See `VALIDATION.md` for the bench procedure and expected logs.
+See `VALIDATION.md` for the bench procedure and expected logs. See
+`LONG_SESSION_FIX_NOTES.md` for the transport-stall diagnosis and recovery policy.

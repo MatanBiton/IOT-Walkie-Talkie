@@ -11,6 +11,10 @@ bool begin();
 bool ensureConnected();
 bool isConnected();
 
+// Requests a controlled station reconnect from the Wi-Fi manager task. This is
+// asynchronous and does not erase credentials.
+void requestReconnect(const char* reason);
+
 // Uses a fixed-size observer table and performs no dynamic allocation.
 // Registering while already connected schedules one prompt notification.
 bool registerConnectedObserver(ConnectedObserver observer, void* context = nullptr);

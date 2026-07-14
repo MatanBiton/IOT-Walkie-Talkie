@@ -33,7 +33,10 @@ void setAudioPriorityActive(bool active);
 void setRecordingActive(bool active);
 bool audioPriorityActive();
 
-bool acquireAudioBlock(uint8_t& outIndex, int16_t*& outSamples);
+bool acquireAudioBlock(
+    uint8_t& outIndex,
+    int16_t*& outSamples,
+    bool& outDroppedOldest);
 void releaseAudioBlock(uint8_t index);
 bool submitAudioBlock(
     uint8_t index,
@@ -46,6 +49,7 @@ uint32_t audioQueueDepth();
 bool audioUploadsIdle();
 bool audioUploadFailed();
 void clearAudioUploadFailure();
+void requestAudioUploadAbort(const char* reason);
 uint32_t discardPendingAudio(const char* reason);
 
 bool scheduleAvailabilityHeartbeat(const char* jsonPayload);

@@ -1,4 +1,4 @@
-# V4 two-device validation
+# V5 two-device validation
 
 ## Before testing
 
@@ -35,7 +35,7 @@ Expected talker sequence:
 [AUDIO_TX] session_start_async ... uploadPrepared=true
 [AUDIO_TX] persistent_connection open ...
 [RTDB_REQUEST] success type=AUDIO_BATCH http=204 ... persistent=true
-[AUDIO_TX] batch_result success=true ...
+[AUDIO_TX] batch_result outcome=success success=true ...
 ```
 
 Only the first audio packet should normally print `persistent_connection open`.
@@ -73,7 +73,7 @@ presses and several 3-5 second presses.
 Required observations:
 
 - Every session reports `uploadPrepared=true`.
-- Audio packets report `batch_result success=true`.
+- Audio packets report `batch_result outcome=success success=true`.
 - The listener receives `CHUNK_DECODE_OK` between active and inactive metadata.
 - A session normally opens only one persistent audio connection.
 - No progressive `largestBlock` collapse occurs per audio packet.
@@ -106,3 +106,30 @@ An active/inactive pair with no chunk is a regression.
 Disable Wi-Fi during transmission. Recording should stop, pending audio should be
 discarded, and the state should enter `Reconnecting`. After Wi-Fi returns, the
 ESP should clean up its session when possible and return to listening.
+
+## G. Long-session and stalled-upload regression
+
+Hold PTT for 15-20 seconds. The LED must remain on until the button is released,
+even if an individual upload times out.
+
+A temporary network stall may produce:
+
+```text
+[AUDIO_TX] queue_full policy=drop_oldest ...
+[AUDIO_TX] batch_result outcome=transient_failure ...
+[AUDIO_TX] transient_failure_continue ... recording=true
+```
+
+These lines are not a session abort. Later chunks should still be attempted.
+When transport recovers, expect `outcome=success` on a later sequence number and
+listener `CHUNK_DECODE_OK` events with possible sequence gaps.
+
+If failures persist after PTT release, one controlled Wi-Fi recovery is expected:
+
+```text
+[AUDIO_TX] transport_recovery action=wifi_reconnect ...
+[WIFI_MANAGER] forced_reconnect ...
+```
+
+After reconnection, the device must return to `Listening` and accept another PTT
+press. It must not remain in an infinite drain loop.

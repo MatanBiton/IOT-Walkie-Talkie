@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <sys/time.h>
 #include <errno.h>
+#include <new>
 
 #include "app_config.h"
 #include "wifi_connection.h"
@@ -41,6 +42,12 @@ enum class HttpMethod : uint8_t {
   Put,
   Patch,
   Delete,
+};
+
+enum class AudioBatchOutcome : uint8_t {
+  Success,
+  TransientFailure,
+  FatalFailure,
 };
 
 struct ControlSlot {
@@ -89,6 +96,10 @@ bool recordingActive = false;
 bool uploadInFlight = false;
 uint8_t uploadInFlightBlockCount = 0;
 bool uploadFailure = false;
+uint32_t consecutiveTransientAudioFailures = 0;
+uint32_t totalTransientAudioFailures = 0;
+bool wifiRecoveryRequestedForSession = false;
+bool audioAbortRequested = false;
 bool uploadSessionAuthorized = false;
 uint8_t authorizedChannel = 0;
 char authorizedSessionId[64] = {0};
@@ -167,6 +178,58 @@ uint32_t lowDepth() {
 
 uint32_t readyAudioDepth() {
   return readyAudioQueue == nullptr ? 0 : uxQueueMessagesWaiting(readyAudioQueue);
+}
+
+void resetAudioBlock(uint8_t index) {
+  if (index >= RtdbUploadConfig::TX_QUEUE_LENGTH) {
+    return;
+  }
+  AudioBlock& block = audioBlocks[index];
+  block.sampleCount = 0;
+  block.channel = 0;
+  block.sequence = 0;
+  block.recordedAtMs = 0;
+  block.sessionId[0] = '\0';
+}
+
+void returnAudioBlockToFreeQueue(uint8_t index) {
+  if (freeAudioQueue == nullptr ||
+      index >= RtdbUploadConfig::TX_QUEUE_LENGTH) {
+    return;
+  }
+  resetAudioBlock(index);
+  xQueueSend(freeAudioQueue, &index, portMAX_DELAY);
+}
+
+bool isAudioAbortRequested() {
+  portENTER_CRITICAL(&serviceMux);
+  const bool requested = audioAbortRequested;
+  portEXIT_CRITICAL(&serviceMux);
+  return requested;
+}
+
+bool isRecordingActiveSnapshot() {
+  portENTER_CRITICAL(&serviceMux);
+  const bool active = recordingActive;
+  portEXIT_CRITICAL(&serviceMux);
+  return active;
+}
+
+const char* audioBatchOutcomeName(AudioBatchOutcome outcome) {
+  switch (outcome) {
+    case AudioBatchOutcome::Success: return "success";
+    case AudioBatchOutcome::TransientFailure: return "transient_failure";
+    case AudioBatchOutcome::FatalFailure: return "fatal_failure";
+    default: return "unknown";
+  }
+}
+
+bool isTransientAudioStatus(int statusCode) {
+  return statusCode <= 0 ||
+         statusCode == 408 ||
+         statusCode == 425 ||
+         statusCode == 429 ||
+         statusCode >= 500;
 }
 
 void logQueueEnqueue(RequestType type) {
@@ -287,6 +350,10 @@ HttpResponse performHttp(
   if (!http.begin(client, url)) {
     response.code = HTTPC_ERROR_NO_HTTP_SERVER;
     response.durationMs = millis() - startMs;
+    // Keep cleanup explicit on every exit path, including partially initialized
+    // HTTP/TLS state.
+    http.end();
+    client.stop();
     logHeap(type, "after_connect_failed");
     Serial.printf(
         "[RTDB_REQUEST] fail type=%s http=%d error=begin_failed durationMs=%lu\n",
@@ -296,10 +363,12 @@ HttpResponse performHttp(
     return response;
   }
 
-  const char* collectedHeaders[] = {"ETag"};
-  http.collectHeaders(collectedHeaders, 1);
+  // collectHeaders() allocates internal header storage. Session start/end never
+  // request an ETag, so avoid that allocation and its heap-fragmentation cost
+  // on every control request.
   if (requestEtag) {
-    
+    const char* collectedHeaders[] = {"ETag"};
+    http.collectHeaders(collectedHeaders, 1);
     http.addHeader("X-Firebase-ETag", "true");
   }
   if (conditionalEtag != nullptr && conditionalEtag[0] != '\0') {
@@ -336,12 +405,6 @@ HttpResponse performHttp(
   }
   response.durationMs = millis() - startMs;
   logHeap(type, "after_connect_request");
-if (requestEtag) {
-  response.etag = http.header("ETag");
-}
-
-
-  
 
   if (response.code >= 200 && response.code < 300) {
     Serial.printf(
@@ -366,6 +429,7 @@ if (requestEtag) {
   }
   http.end();
   client.stop();
+  logHeap(type, "after_cleanup");
   return response;
 }
 
@@ -485,9 +549,20 @@ bool initializeFirebaseHost() {
   return true;
 }
 
+void resetAudioUploadClient() {
+  // stop() releases the active socket/TLS buffers, but some Arduino-ESP32 core
+  // versions retain per-client bookkeeping until the client is destroyed.
+  // Reconstructing the long-lived client after every closed session guarantees
+  // that all internal allocations are returned immediately instead of being
+  // carried into the next TLS handshake.
+  audioUploadClient.stop();
+  audioUploadClient.~WiFiClientSecure();
+  new (&audioUploadClient) WiFiClientSecure();
+}
+
 void closeAudioUploadConnection(const char* reason) {
   const bool wasOpen = audioUploadConnectionOpen || audioUploadClient.connected();
-  audioUploadClient.stop();
+  resetAudioUploadClient();
   audioUploadConnectionOpen = false;
   if (wasOpen && RtdbHttpConfig::LOG_HTTP_REQUESTS) {
     Serial.printf(
@@ -534,6 +609,9 @@ bool readAudioHttpLine(char* out, size_t outSize, uint32_t timeoutMs) {
   bool overflow = false;
   const uint32_t startedAtMs = millis();
   while ((millis() - startedAtMs) < timeoutMs) {
+    if (isAudioAbortRequested()) {
+      return false;
+    }
     while (audioUploadClient.available() > 0) {
       const int value = audioUploadClient.read();
       if (value < 0) {
@@ -565,6 +643,9 @@ bool drainAudioHttpBytes(size_t byteCount, uint32_t timeoutMs) {
   const uint32_t startedAtMs = millis();
   size_t drained = 0;
   while (drained < byteCount && (millis() - startedAtMs) < timeoutMs) {
+    if (isAudioAbortRequested()) {
+      return false;
+    }
     while (audioUploadClient.available() > 0 && drained < byteCount) {
       audioUploadClient.read();
       ++drained;
@@ -668,6 +749,9 @@ bool writeAudioClientAll(const uint8_t* data, size_t length, uint32_t timeoutMs)
   const uint32_t startedAtMs = millis();
   size_t sent = 0;
   while (sent < length && (millis() - startedAtMs) < timeoutMs) {
+    if (isAudioAbortRequested()) {
+      return false;
+    }
     const size_t written = audioUploadClient.write(data + sent, length - sent);
     if (written > 0) {
       sent += written;
@@ -682,6 +766,10 @@ bool writeAudioClientAll(const uint8_t* data, size_t length, uint32_t timeoutMs)
 }
 
 bool ensureAudioUploadConnection() {
+  if (isAudioAbortRequested()) {
+    closeAudioUploadConnection("abort_before_connect");
+    return false;
+  }
   if (audioUploadConnectionOpen && audioUploadClient.connected()) {
     return true;
   }
@@ -692,9 +780,22 @@ bool ensureAudioUploadConnection() {
   closeAudioUploadConnection("reconnect");
   audioUploadClient.setInsecure();
   audioUploadClient.setTimeout(RtdbUploadConfig::UPLOAD_RESPONSE_TIMEOUT_MS);
+  audioUploadClient.setHandshakeTimeout(
+      RtdbUploadConfig::UPLOAD_TLS_HANDSHAKE_TIMEOUT_SECONDS);
   logHeap(RequestType::AudioBatch, "before_persistent_tls_connect");
-  if (!audioUploadClient.connect(firebaseHost, 443)) {
+  if (!audioUploadClient.connect(
+          firebaseHost,
+          443,
+          RtdbUploadConfig::UPLOAD_CONNECT_TIMEOUT_MS)) {
+    // A failed TLS setup may have allocated part of the mbedTLS context. Always
+    // destroy that partial context before retrying. Merely setting the open flag
+    // to false is not enough on every Arduino-ESP32 core version.
+    closeAudioUploadConnection("connect_failed");
     logHeap(RequestType::AudioBatch, "persistent_tls_connect_failed");
+    return false;
+  }
+  if (isAudioAbortRequested()) {
+    closeAudioUploadConnection("abort_after_connect");
     return false;
   }
   audioUploadConnectionOpen = true;
@@ -720,6 +821,9 @@ int performPersistentAudioPatch(
 
   if (!WifiConnection::isConnected()) {
     return HTTPC_ERROR_NOT_CONNECTED;
+  }
+  if (isAudioAbortRequested()) {
+    return HTTPC_ERROR_CONNECTION_LOST;
   }
   if (!ensureAudioUploadConnection()) {
     return HTTPC_ERROR_CONNECTION_REFUSED;
@@ -849,15 +953,15 @@ bool isAudioSessionAuthorized(const AudioBlock& block) {
   return authorized;
 }
 
-bool uploadAudioBatch(const uint8_t* indices, size_t count) {
+AudioBatchOutcome uploadAudioBatch(const uint8_t* indices, size_t count) {
   if (indices == nullptr || count == 0) {
-    return true;
+    return AudioBatchOutcome::Success;
   }
   if (count != 1) {
     Serial.printf(
         "[AUDIO_TX] batch_abort reason=unsupported_batch_count count=%u\n",
         static_cast<unsigned int>(count));
-    return false;
+    return AudioBatchOutcome::FatalFailure;
   }
 
   const AudioBlock& block = audioBlocks[indices[0]];
@@ -867,20 +971,27 @@ bool uploadAudioBatch(const uint8_t* indices, size_t count) {
         static_cast<unsigned int>(block.channel),
         block.sessionId,
         static_cast<unsigned long>(block.sequence));
-    return false;
+    return AudioBatchOutcome::FatalFailure;
   }
   if (block.channel == 0 || block.sessionId[0] == '\0' ||
       block.channel != audioUploadConnectionChannel ||
       strcmp(block.sessionId, audioUploadConnectionSessionId) != 0) {
     Serial.println("[AUDIO_TX] batch_abort reason=invalid_persistent_session_context");
-    return false;
+    return AudioBatchOutcome::FatalFailure;
   }
 
+  const bool recordingNow = isRecordingActiveSnapshot();
+  const uint8_t maxAttempts = recordingNow
+                                  ? RtdbUploadConfig::LIVE_UPLOAD_MAX_ATTEMPTS
+                                  : RtdbUploadConfig::DRAIN_UPLOAD_MAX_ATTEMPTS;
+
   Serial.printf(
-      "[AUDIO_TX] batch channel=%u count=1 firstSeq=%lu lastSeq=%lu\n",
+      "[AUDIO_TX] batch channel=%u count=1 firstSeq=%lu lastSeq=%lu recording=%s maxAttempts=%u\n",
       static_cast<unsigned int>(block.channel),
       static_cast<unsigned long>(block.sequence),
-      static_cast<unsigned long>(block.sequence));
+      static_cast<unsigned long>(block.sequence),
+      recordingNow ? "true" : "false",
+      static_cast<unsigned int>(maxAttempts));
 
   size_t payloadLength = 0;
   size_t encodedBytes = 0;
@@ -896,37 +1007,44 @@ bool uploadAudioBatch(const uint8_t* indices, size_t count) {
         static_cast<unsigned int>(sizeof(audioUploadJson)),
         static_cast<unsigned long>(
             heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
-    return false;
+    return AudioBatchOutcome::FatalFailure;
   }
 
+  int lastStatusCode = HTTPC_ERROR_CONNECTION_REFUSED;
   bool success = false;
-  for (uint8_t attempt = 1;
-       attempt <= RtdbUploadConfig::UPLOAD_MAX_ATTEMPTS;
-       ++attempt) {
-    const int statusCode = performPersistentAudioPatch(
+  for (uint8_t attempt = 1; attempt <= maxAttempts; ++attempt) {
+    lastStatusCode = performPersistentAudioPatch(
         reinterpret_cast<const uint8_t*>(audioUploadJson),
         payloadLength,
         attempt);
-    success = statusCode >= 200 && statusCode < 300;
-    if (success || !WifiConnection::isConnected()) {
+    success = lastStatusCode >= 200 && lastStatusCode < 300;
+    if (success || !WifiConnection::isConnected() || isAudioAbortRequested()) {
       break;
     }
-    if (attempt < RtdbUploadConfig::UPLOAD_MAX_ATTEMPTS) {
+    if (attempt < maxAttempts) {
       vTaskDelay(pdMS_TO_TICKS(RtdbUploadConfig::UPLOAD_RETRY_DELAY_MS));
     }
   }
 
+  const AudioBatchOutcome outcome =
+      success ? AudioBatchOutcome::Success
+              : (isTransientAudioStatus(lastStatusCode)
+                     ? AudioBatchOutcome::TransientFailure
+                     : AudioBatchOutcome::FatalFailure);
+
   Serial.printf(
-      "[AUDIO_TX] batch_result success=%s count=1 firstSeq=%lu lastSeq=%lu encodedBytes=%u payloadBytes=%u queueDepth=%lu largestBlock=%lu\n",
+      "[AUDIO_TX] batch_result outcome=%s success=%s count=1 firstSeq=%lu lastSeq=%lu http=%d encodedBytes=%u payloadBytes=%u queueDepth=%lu largestBlock=%lu\n",
+      audioBatchOutcomeName(outcome),
       success ? "true" : "false",
       static_cast<unsigned long>(block.sequence),
       static_cast<unsigned long>(block.sequence),
+      lastStatusCode,
       static_cast<unsigned int>(encodedBytes),
       static_cast<unsigned int>(payloadLength),
       static_cast<unsigned long>(readyAudioDepth()),
       static_cast<unsigned long>(
           heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
-  return success;
+  return outcome;
 }
 
 void processAudioBatch(uint8_t firstIndex) {
@@ -967,17 +1085,49 @@ void processAudioBatch(uint8_t firstIndex) {
   }
 
   logQueueEnqueue(RequestType::AudioBatch);
-  const bool success = uploadAudioBatch(indices, count);
+  const AudioBatchOutcome outcome = uploadAudioBatch(indices, count);
+  bool requestWifiRecovery = false;
+  uint32_t consecutiveFailuresSnapshot = 0;
+  uint32_t totalFailuresSnapshot = 0;
   portENTER_CRITICAL(&serviceMux);
   uploadInFlight = false;
   uploadInFlightBlockCount = 0;
-  if (!success) {
+  if (outcome == AudioBatchOutcome::Success) {
+    consecutiveTransientAudioFailures = 0;
+  } else if (outcome == AudioBatchOutcome::TransientFailure) {
+    ++consecutiveTransientAudioFailures;
+    ++totalTransientAudioFailures;
+    consecutiveFailuresSnapshot = consecutiveTransientAudioFailures;
+    totalFailuresSnapshot = totalTransientAudioFailures;
+    if (!recordingActive &&
+        !audioAbortRequested &&
+        !wifiRecoveryRequestedForSession &&
+        consecutiveTransientAudioFailures >=
+            RtdbUploadConfig::DRAIN_FAILURES_BEFORE_WIFI_RECOVERY) {
+      wifiRecoveryRequestedForSession = true;
+      requestWifiRecovery = true;
+    }
+  } else {
     uploadFailure = true;
   }
   portEXIT_CRITICAL(&serviceMux);
 
   for (size_t index = 0; index < count; ++index) {
-    xQueueSend(freeAudioQueue, &indices[index], portMAX_DELAY);
+    returnAudioBlockToFreeQueue(indices[index]);
+  }
+
+  if (outcome == AudioBatchOutcome::TransientFailure) {
+    Serial.printf(
+        "[AUDIO_TX] transient_failure_continue consecutive=%lu total=%lu recording=%s readyDepth=%lu\n",
+        static_cast<unsigned long>(consecutiveFailuresSnapshot),
+        static_cast<unsigned long>(totalFailuresSnapshot),
+        isRecordingActiveSnapshot() ? "true" : "false",
+        static_cast<unsigned long>(readyAudioDepth()));
+  }
+  if (requestWifiRecovery) {
+    Serial.println(
+        "[AUDIO_TX] transport_recovery action=wifi_reconnect reason=repeated_drain_failures");
+    WifiConnection::requestReconnect("repeated_audio_transport_failures");
   }
 }
 
@@ -1470,6 +1620,11 @@ bool scheduleSessionStart(uint8_t channel, const char* sessionId) {
   }
 
   portENTER_CRITICAL(&serviceMux);
+  audioAbortRequested = false;
+  uploadFailure = false;
+  consecutiveTransientAudioFailures = 0;
+  totalTransientAudioFailures = 0;
+  wifiRecoveryRequestedForSession = false;
   uploadSessionAuthorized = false;
   authorizedChannel = 0;
   authorizedSessionId[0] = '\0';
@@ -1529,22 +1684,57 @@ bool audioPriorityActive() {
   return active;
 }
 
-bool acquireAudioBlock(uint8_t& outIndex, int16_t*& outSamples) {
+bool acquireAudioBlock(
+    uint8_t& outIndex,
+    int16_t*& outSamples,
+    bool& outDroppedOldest) {
   outSamples = nullptr;
-  if (freeAudioQueue == nullptr || xQueueReceive(freeAudioQueue, &outIndex, 0) != pdTRUE) {
-    Serial.printf(
-        "[AUDIO_TX] queue_full readyDepth=%lu freeDepth=0\n",
-        static_cast<unsigned long>(readyAudioDepth()));
-    return false;
+  outDroppedOldest = false;
+
+  if (freeAudioQueue != nullptr &&
+      xQueueReceive(freeAudioQueue, &outIndex, 0) == pdTRUE) {
+    outSamples = audioBlocks[outIndex].samples;
+    return true;
   }
-  outSamples = audioBlocks[outIndex].samples;
-  return true;
+
+  // The fixed PCM pool is intentionally bounded. During a network stall, reuse
+  // the oldest block still waiting in readyAudioQueue instead of discarding the
+  // newest microphone audio. The in-flight block cannot be reclaimed here.
+  uint8_t reclaimedIndex = 0;
+  if (readyAudioQueue != nullptr &&
+      xQueueReceive(readyAudioQueue, &reclaimedIndex, 0) == pdTRUE) {
+    const uint32_t droppedSequence = audioBlocks[reclaimedIndex].sequence;
+    char droppedSessionId[64] = {0};
+    snprintf(
+        droppedSessionId,
+        sizeof(droppedSessionId),
+        "%s",
+        audioBlocks[reclaimedIndex].sessionId);
+    resetAudioBlock(reclaimedIndex);
+    outIndex = reclaimedIndex;
+    outSamples = audioBlocks[outIndex].samples;
+    outDroppedOldest = true;
+    Serial.printf(
+        "[AUDIO_TX] queue_full policy=drop_oldest droppedSession=%s droppedSeq=%lu readyDepth=%lu\n",
+        droppedSessionId,
+        static_cast<unsigned long>(droppedSequence),
+        static_cast<unsigned long>(readyAudioDepth()));
+    return true;
+  }
+
+  uint8_t inFlightCount = 0;
+  portENTER_CRITICAL(&serviceMux);
+  inFlightCount = uploadInFlightBlockCount;
+  portEXIT_CRITICAL(&serviceMux);
+  Serial.printf(
+      "[AUDIO_TX] queue_exhausted readyDepth=%lu inFlight=%u freeDepth=0\n",
+      static_cast<unsigned long>(readyAudioDepth()),
+      static_cast<unsigned int>(inFlightCount));
+  return false;
 }
 
 void releaseAudioBlock(uint8_t index) {
-  if (freeAudioQueue != nullptr && index < RtdbUploadConfig::TX_QUEUE_LENGTH) {
-    xQueueSend(freeAudioQueue, &index, portMAX_DELAY);
-  }
+  returnAudioBlockToFreeQueue(index);
 }
 
 bool submitAudioBlock(
@@ -1613,14 +1803,31 @@ bool audioUploadFailed() {
 void clearAudioUploadFailure() {
   portENTER_CRITICAL(&serviceMux);
   uploadFailure = false;
+  audioAbortRequested = false;
+  consecutiveTransientAudioFailures = 0;
+  totalTransientAudioFailures = 0;
+  wifiRecoveryRequestedForSession = false;
   portEXIT_CRITICAL(&serviceMux);
+}
+
+void requestAudioUploadAbort(const char* reason) {
+  portENTER_CRITICAL(&serviceMux);
+  audioAbortRequested = true;
+  portEXIT_CRITICAL(&serviceMux);
+  Serial.printf(
+      "[AUDIO_TX] abort_requested reason=%s queueDepth=%lu\n",
+      reason == nullptr ? "unspecified" : reason,
+      static_cast<unsigned long>(audioQueueDepth()));
+  if (requestTaskHandle != nullptr) {
+    xTaskNotifyGive(requestTaskHandle);
+  }
 }
 
 uint32_t discardPendingAudio(const char* reason) {
   uint32_t discarded = 0;
   uint8_t index = 0;
   while (readyAudioQueue != nullptr && xQueueReceive(readyAudioQueue, &index, 0) == pdTRUE) {
-    xQueueSend(freeAudioQueue, &index, portMAX_DELAY);
+    returnAudioBlockToFreeQueue(index);
     ++discarded;
   }
   if (discarded > 0) {

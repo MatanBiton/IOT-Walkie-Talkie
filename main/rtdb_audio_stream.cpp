@@ -6,6 +6,8 @@
 #include <ctype.h>
 #include <esp_heap_caps.h>
 #include <mbedtls/base64.h>
+#include <new>
+#include <utility>
 
 #include "app_config.h"
 #include "wifi_connection.h"
@@ -37,6 +39,34 @@ String selectedSessionId;
 uint32_t selectedLastChunkAtMs = 0;
 bool selectedHaveSequence = false;
 uint32_t selectedLastSequence = 0;
+
+void releaseStringStorage(String& value) {
+  // Assigning an empty literal only changes length and intentionally retains the
+  // backing allocation. Move-assigning a fresh String destroys that backing
+  // allocation, which is required while SSE is paused for a talker TLS request.
+  String empty;
+  value = std::move(empty);
+}
+
+void resetStreamTransport() {
+  // HTTPClient::end() and WiFiClientSecure::stop() close the connection, but
+  // long-lived objects may retain URL/header/TLS bookkeeping. Reconstruct both
+  // objects so every pause/reconnect starts from a fully released state.
+  streamHttp.end();
+  streamClient.stop();
+  streamHttp.~HTTPClient();
+  new (&streamHttp) HTTPClient();
+  streamClient.~WiFiClientSecure();
+  new (&streamClient) WiFiClientSecure();
+}
+
+void releaseStoppedStreamMemory() {
+  releaseStringStorage(sseLine);
+  releaseStringStorage(sseEvent);
+  releaseStringStorage(sseData);
+  releaseStringStorage(selectedDeviceId);
+  releaseStringStorage(selectedSessionId);
+}
 
 const char* boolText(bool value) {
   return value ? "true" : "false";
@@ -936,6 +966,8 @@ bool startListening(uint8_t channel) {
   logStreamHeap("after_http_begin");
   if (!began) {
     Serial.println("[RTDB][STREAM] Stream begin failed");
+    resetStreamTransport();
+    releaseStoppedStreamMemory();
     return false;
   }
 
@@ -950,8 +982,8 @@ bool startListening(uint8_t channel) {
       Serial.print("[RTDB][STREAM] Response: ");
       Serial.println(response);
     }
-    streamHttp.end();
-    streamClient.stop();
+    resetStreamTransport();
+    releaseStoppedStreamMemory();
     return false;
   }
 
@@ -978,14 +1010,11 @@ void stopListening() {
     Serial.println("[RTDB][STREAM] Stopping stream");
   }
 
-  streamHttp.end();
-  streamClient.stop();
-  sseLine = "";
-  sseEvent = "";
-  sseData = "";
+  resetStreamTransport();
   droppingOversizedSseLine = false;
   firstSnapshotSeen = false;
   clearRemoteTalker("stream_stop");
+  releaseStoppedStreamMemory();
 
   Serial.printf(
       "[RTDB][STREAM] stopped freeHeap=%lu largestBlock=%lu\n",

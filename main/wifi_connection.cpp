@@ -26,9 +26,12 @@ TaskHandle_t wifiManagerTaskHandle = nullptr;
 ObserverSlot observerSlots[MAX_CONNECTED_OBSERVERS];
 portMUX_TYPE observerMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE wifiEventMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE reconnectRequestMux = portMUX_INITIALIZER_UNLOCKED;
 unsigned long lastReconnectAttemptMs = 0;
 bool haveReconnectAttempt = false;
 bool connectivityReturnEventPending = false;
+bool forcedReconnectPending = false;
+char forcedReconnectReason[64] = {0};
 
 void logWifiEvent(WiFiEvent_t event, const WiFiEventInfo_t& info) {
   const wl_status_t status = WiFi.status();
@@ -101,6 +104,21 @@ bool takeConnectivityReturnEvent() {
   return pending;
 }
 
+bool takeForcedReconnectRequest(char* outReason, size_t outReasonSize) {
+  bool pending = false;
+  portENTER_CRITICAL(&reconnectRequestMux);
+  pending = forcedReconnectPending;
+  if (pending) {
+    forcedReconnectPending = false;
+    if (outReason != nullptr && outReasonSize > 0) {
+      snprintf(outReason, outReasonSize, "%s", forcedReconnectReason);
+    }
+    forcedReconnectReason[0] = '\0';
+  }
+  portEXIT_CRITICAL(&reconnectRequestMux);
+  return pending;
+}
+
 void notifyConnectedObservers(bool notifyAll) {
   WifiConnection::ConnectedObserver callbacks[MAX_CONNECTED_OBSERVERS] = {};
   void* contexts[MAX_CONNECTED_OBSERVERS] = {};
@@ -158,6 +176,19 @@ void wifiManagerTask(void*) {
   bool previouslyConnected = false;
 
   for (;;) {
+    char reconnectReason[64] = {0};
+    if (takeForcedReconnectRequest(reconnectReason, sizeof(reconnectReason))) {
+      Serial.printf(
+          "[WIFI_MANAGER] forced_reconnect reason=%s status=%d\n",
+          reconnectReason[0] == '\0' ? "unspecified" : reconnectReason,
+          static_cast<int>(WiFi.status()));
+      // Preserve credentials and NVS. The manager owns the subsequent begin().
+      WiFi.disconnect(false, false);
+      haveReconnectAttempt = false;
+      previouslyConnected = false;
+      vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
     const bool connected = WifiConnection::isConnected();
     const bool connectivityReturned = takeConnectivityReturnEvent();
     if (connected) {
@@ -237,6 +268,23 @@ bool ensureConnected() {
   // Kept for source compatibility. It is deliberately non-blocking and never
   // manipulates or wakes the radio; only the manager task owns reconnection.
   return isConnected();
+}
+
+void requestReconnect(const char* reason) {
+  portENTER_CRITICAL(&reconnectRequestMux);
+  if (!forcedReconnectPending) {
+    forcedReconnectPending = true;
+    snprintf(
+        forcedReconnectReason,
+        sizeof(forcedReconnectReason),
+        "%s",
+        (reason == nullptr || reason[0] == '\0') ? "unspecified" : reason);
+  }
+  portEXIT_CRITICAL(&reconnectRequestMux);
+
+  if (wifiManagerTaskHandle != nullptr) {
+    xTaskNotifyGive(wifiManagerTaskHandle);
+  }
 }
 
 bool registerConnectedObserver(ConnectedObserver observer, void* context) {

@@ -130,15 +130,31 @@ constexpr unsigned long STREAM_RECONNECT_INTERVAL_MS = 3000;
 namespace RtdbUploadConfig {
 
 // Ten fixed blocks cover two seconds of 200 ms audio without placing full PCM
-// arrays inside a FreeRTOS queue. One chunk is sent per persistent HTTP PATCH.
+// arrays inside a FreeRTOS queue. When the network stalls and all blocks are
+// occupied, the recorder replaces the oldest queued (not in-flight) chunk with
+// the newest speech. This bounds RAM while keeping live audio current.
 constexpr uint8_t TX_QUEUE_LENGTH = 10;
 constexpr uint8_t UPLOAD_BATCH_MAX_CHUNKS = 1;
 constexpr uint32_t BATCH_COLLECTION_WINDOW_MS = 300;
-constexpr uint8_t UPLOAD_MAX_ATTEMPTS = 2;
-constexpr unsigned long UPLOAD_RETRY_DELAY_MS = 250;
-// Persistent audio PATCH response budget. Audio uses one TLS connection per
-// PTT session instead of reconnecting for every 200 ms chunk.
-constexpr uint32_t UPLOAD_RESPONSE_TIMEOUT_MS = 5000;
+// While PTT is held, do not spend another full timeout retrying stale audio.
+// Move to a newer queued chunk instead. Once recording stops, retry each
+// remaining chunk once because latency is no longer more important than loss.
+constexpr uint8_t LIVE_UPLOAD_MAX_ATTEMPTS = 1;
+constexpr uint8_t DRAIN_UPLOAD_MAX_ATTEMPTS = 2;
+constexpr unsigned long UPLOAD_RETRY_DELAY_MS = 200;
+// A response stall previously blocked the uploader for more than five seconds,
+// while the fixed PCM pool only holds two seconds. Bound the response wait so
+// the uploader can close the bad socket and continue with newer audio.
+constexpr uint32_t UPLOAD_RESPONSE_TIMEOUT_MS = 3000;
+// Bound both TCP setup and the TLS handshake. setTimeout() alone only bounds
+// stream reads and previously allowed a failed connect to hold the request
+// task indefinitely with one audio block marked in flight.
+constexpr int32_t UPLOAD_CONNECT_TIMEOUT_MS = 4000;
+constexpr unsigned long UPLOAD_TLS_HANDSHAKE_TIMEOUT_SECONDS = 4;
+// During draining, repeated socket failures while Wi-Fi still reports
+// WL_CONNECTED indicate a stale radio/network path. Ask the Wi-Fi manager for
+// one controlled reconnect so later PTT sessions do not remain broken.
+constexpr uint8_t DRAIN_FAILURES_BEFORE_WIFI_RECOVERY = 2;
 constexpr uint32_t UPLOAD_TASK_STACK_BYTES = 16384;
 constexpr uint8_t UPLOAD_TASK_PRIORITY = 1;
 constexpr uint8_t UPLOAD_TASK_CORE = 1;

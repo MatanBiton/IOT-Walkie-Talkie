@@ -475,6 +475,7 @@ void communicationTask(void*) {
   uint32_t droppedChunks = 0;
   uint32_t sessionStartedAtMs = 0;
   uint32_t drainStartedAtMs = 0;
+  bool drainAbortRequested = false;
   bool recordedAtLeastOneChunk = false;
 
   Communication::begin();
@@ -549,6 +550,7 @@ void communicationTask(void*) {
         sessionStartedAtMs = millis();
         sequence = 0;
         droppedChunks = 0;
+        drainAbortRequested = false;
         recordedAtLeastOneChunk = false;
 
         RtdbRequestService::clearAudioUploadFailure();
@@ -586,6 +588,8 @@ void communicationTask(void*) {
         if (!WifiConnection::isConnected()) {
           RtdbRequestService::setRecordingActive(false);
           RtdbRequestService::discardPendingAudio("wifi_disconnected");
+          RtdbRequestService::requestAudioUploadAbort(
+              "wifi_disconnected_during_transmission");
           digitalWrite(Pins::RECORDING_LED, LOW);
           Communication::transitionTo(
               Communication::State::Reconnecting,
@@ -597,6 +601,7 @@ void communicationTask(void*) {
           RtdbRequestService::discardPendingAudio("audio_upload_failed");
           digitalWrite(Pins::RECORDING_LED, LOW);
           drainStartedAtMs = millis();
+          drainAbortRequested = false;
           Communication::transitionTo(
               Communication::State::DrainingUploads,
               "audio_upload_failed");
@@ -609,6 +614,7 @@ void communicationTask(void*) {
           RtdbRequestService::setRecordingActive(false);
           digitalWrite(Pins::RECORDING_LED, LOW);
           drainStartedAtMs = millis();
+          drainAbortRequested = false;
           Communication::transitionTo(
               Communication::State::DrainingUploads,
               recordedAtLeastOneChunk ? "push_to_talk_released"
@@ -620,6 +626,7 @@ void communicationTask(void*) {
           RtdbRequestService::setRecordingActive(false);
           digitalWrite(Pins::RECORDING_LED, LOW);
           drainStartedAtMs = millis();
+          drainAbortRequested = false;
           Communication::transitionTo(
               Communication::State::DrainingUploads,
               "session_chunk_limit_reached");
@@ -628,7 +635,11 @@ void communicationTask(void*) {
 
         uint8_t blockIndex = 0;
         int16_t* samples = nullptr;
-        if (!RtdbRequestService::acquireAudioBlock(blockIndex, samples)) {
+        bool droppedOldest = false;
+        if (!RtdbRequestService::acquireAudioBlock(
+                blockIndex,
+                samples,
+                droppedOldest)) {
           size_t discardedSamples = 0;
           AudioIO::readMicChunk(
               droppedMicBuffer,
@@ -636,10 +647,13 @@ void communicationTask(void*) {
               discardedSamples);
           ++droppedChunks;
           Serial.printf(
-              "[AUDIO_TX] discard reason=queue_full dropped=%lu queueDepth=%lu\n",
+              "[AUDIO_TX] discard reason=all_blocks_unavailable dropped=%lu queueDepth=%lu\n",
               static_cast<unsigned long>(droppedChunks),
               static_cast<unsigned long>(RtdbRequestService::audioQueueDepth()));
           break;
+        }
+        if (droppedOldest) {
+          ++droppedChunks;
         }
 
         size_t samplesRead = 0;
@@ -669,6 +683,8 @@ void communicationTask(void*) {
       case Communication::State::DrainingUploads:
         if (!WifiConnection::isConnected()) {
           RtdbRequestService::discardPendingAudio("wifi_disconnected_during_drain");
+          RtdbRequestService::requestAudioUploadAbort(
+              "wifi_disconnected_during_drain");
           Communication::transitionTo(
               Communication::State::Reconnecting,
               "wifi_disconnected_during_drain");
@@ -677,11 +693,14 @@ void communicationTask(void*) {
         if (RtdbRequestService::audioUploadFailed()) {
           RtdbRequestService::discardPendingAudio("audio_upload_failed_during_drain");
         }
-        if ((millis() - drainStartedAtMs) >=
-            CommunicationConfig::UPLOAD_DRAIN_TIMEOUT_MS) {
+        if (!drainAbortRequested &&
+            (millis() - drainStartedAtMs) >=
+                CommunicationConfig::UPLOAD_DRAIN_TIMEOUT_MS) {
           RtdbRequestService::discardPendingAudio("drain_timeout");
+          RtdbRequestService::requestAudioUploadAbort("drain_timeout");
+          drainAbortRequested = true;
           Serial.printf(
-              "[AUDIO_TX] drain_timeout session=%s queueDepth=%lu\n",
+              "[AUDIO_TX] drain_timeout session=%s queueDepth=%lu abortRequested=true\n",
               sessionId,
               static_cast<unsigned long>(RtdbRequestService::audioQueueDepth()));
         }
