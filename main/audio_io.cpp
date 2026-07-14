@@ -16,11 +16,7 @@ constexpr i2s_port_t SPEAKER_I2S_PORT = I2S_NUM_1;
 bool micStarted = false;
 bool speakerStarted = false;
 
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
 constexpr i2s_comm_format_t I2S_COMM_FORMAT_COMPAT = I2S_COMM_FORMAT_STAND_I2S;
-#else
-constexpr i2s_comm_format_t I2S_COMM_FORMAT_COMPAT = I2S_COMM_FORMAT_I2S;
-#endif
 
 }  // namespace
 
@@ -170,6 +166,14 @@ bool playPcm16(const int16_t* samples, size_t sampleCount) {
     offset += frames;
   }
 
+  // ESP-IDF bundled with Arduino-ESP32 2.x has no i2s_wait_tx_done(). Keep the
+  // playback task marked active for the maximum remaining DMA-ring duration so
+  // microphone capture cannot begin while the final speaker frames are playing.
+  constexpr uint32_t SPEAKER_DMA_DRAIN_MS =
+      (AudioConfig::I2S_DMA_BUFFER_COUNT * AudioConfig::I2S_DMA_BUFFER_LEN * 1000UL) /
+          AudioConfig::SAMPLE_RATE +
+      5;
+  vTaskDelay(pdMS_TO_TICKS(SPEAKER_DMA_DRAIN_MS));
   return true;
 }
 

@@ -1,8 +1,5 @@
 #include "availability_service.h"
 
-#include <HTTPClient.h>
-#include <WiFi.h>
-#include <WiFiClientSecure.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <esp_idf_version.h>
@@ -18,6 +15,7 @@
 #include <time.h>
 
 #include "app_config.h"
+#include "rtdb_request_service.h"
 #include "wifi_connection.h"
 
 namespace {
@@ -63,28 +61,17 @@ uint64_t lastHandledP2pSlot = NO_P2P_SLOT_HANDLED;
 String reusablePayload;
 String reusableResponse;
 
+bool heartbeatDue = true;
+bool usersReadDue = true;
+bool heartbeatAwaitingResult = false;
+bool usersReadAwaitingResult = false;
+bool usersReadDeferredLogged = false;
+unsigned long lastRtdbPeriodMs = 0;
+unsigned long lastHeartbeatScheduleAttemptMs = 0;
+unsigned long lastUsersReadScheduleAttemptMs = 0;
+
 bool logEnabled() {
   return AvailabilityConfig::LOG_AVAILABILITY;
-}
-
-String databaseBaseUrl() {
-  String base = FirebaseConfig::DATABASE_URL;
-  while (base.endsWith("/")) {
-    base.remove(base.length() - 1);
-  }
-  return base;
-}
-
-String rtdbUrlForPath(const String& path, bool silentWrite) {
-  String url = databaseBaseUrl() + path + ".json";
-  if (silentWrite) {
-    url += "?print=silent";
-  }
-  return url;
-}
-
-String userPath(const char* userId) {
-  return String(AvailabilityConfig::RTDB_USERS_PATH) + "/user_" + userId;
 }
 
 uint8_t userNumberFromId(const char* id) {
@@ -107,8 +94,8 @@ void userIdFromNumber(uint8_t userNumber, char* out, size_t outSize) {
 
 uint32_t voipOfflineThresholdMs() {
   return static_cast<uint32_t>(
-      (AvailabilityConfig::PERIOD_TIME_MS * AvailabilityConfig::VOIP_OFFLINE_THRESHOLD_NUMERATOR) /
-      AvailabilityConfig::VOIP_OFFLINE_THRESHOLD_DENOMINATOR);
+      AvailabilityConfig::PERIOD_TIME_MS *
+      AvailabilityConfig::VOIP_OFFLINE_AFTER_MISSED_PERIODS);
 }
 
 uint32_t p2pOfflineThresholdMs() {
@@ -212,116 +199,6 @@ void buildRtdbHeartbeatPayload(String& payload) {
   payload += "\"}";
 }
 
-bool httpPutJson(const String& path, const String& json, bool silentWrite, const char* label) {
-  if (!WifiConnection::isConnected()) {
-    if (logEnabled()) {
-      Serial.printf("[Availability][%s] PUT skipped: WiFi disconnected path=%s\n", label, path.c_str());
-    }
-    return false;
-  }
-
-  WiFiClientSecure client;
-  client.setInsecure();
-
-  HTTPClient http;
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.useHTTP10(true);
-  http.setTimeout(AvailabilityConfig::RTDB_HTTP_TIMEOUT_MS);
-  http.setConnectTimeout(AvailabilityConfig::RTDB_CONNECT_TIMEOUT_MS);
-
-  const String url = rtdbUrlForPath(path, silentWrite);
-  if (!http.begin(client, url)) {
-    if (logEnabled()) {
-      Serial.printf("[Availability][%s] PUT begin failed path=%s\n", label, path.c_str());
-    }
-    return false;
-  }
-
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Connection", "close");
-  const int code = http.PUT(json);
-  String response;
-  if (code < 200 || code >= 300) {
-    response = http.getString();
-  }
-  http.end();
-
-  const bool ok = code >= 200 && code < 300;
-  if (logEnabled()) {
-    Serial.printf(
-        "[Availability][%s] PUT_%s path=%s http=%d bytes=%u\n",
-        label,
-        ok ? "OK" : "FAIL",
-        path.c_str(),
-        code,
-        static_cast<unsigned int>(json.length()));
-    if (!ok && response.length() > 0) {
-      Serial.print("[Availability][RTDB_RESPONSE] ");
-      Serial.println(response);
-    }
-  }
-  return ok;
-}
-
-bool httpGetJson(const String& path, String& out, const char* label) {
-  out = "";
-  if (!WifiConnection::isConnected()) {
-    if (logEnabled()) {
-      Serial.printf("[Availability][%s] GET skipped: WiFi disconnected path=%s\n", label, path.c_str());
-    }
-    return false;
-  }
-
-  WiFiClientSecure client;
-  client.setInsecure();
-
-  HTTPClient http;
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.useHTTP10(true);
-  http.setTimeout(AvailabilityConfig::RTDB_HTTP_TIMEOUT_MS);
-  http.setConnectTimeout(AvailabilityConfig::RTDB_CONNECT_TIMEOUT_MS);
-
-  const String url = rtdbUrlForPath(path, false);
-  if (!http.begin(client, url)) {
-    if (logEnabled()) {
-      Serial.printf("[Availability][%s] GET begin failed path=%s\n", label, path.c_str());
-    }
-    return false;
-  }
-
-  http.addHeader("Connection", "close");
-  const int code = http.GET();
-  if (code >= 200 && code < 300) {
-    out = http.getString();
-  } else {
-    String response = http.getString();
-    if (logEnabled()) {
-      Serial.printf(
-          "[Availability][%s] GET_FAIL path=%s http=%d responseBytes=%u\n",
-          label,
-          path.c_str(),
-          code,
-          static_cast<unsigned int>(response.length()));
-      if (response.length() > 0) {
-        Serial.print("[Availability][RTDB_RESPONSE] ");
-        Serial.println(response);
-      }
-    }
-  }
-  http.end();
-
-  const bool ok = code >= 200 && code < 300;
-  if (ok && logEnabled()) {
-    Serial.printf(
-        "[Availability][%s] GET_OK path=%s http=%d bytes=%u\n",
-        label,
-        path.c_str(),
-        code,
-        static_cast<unsigned int>(out.length()));
-  }
-  return ok;
-}
-
 bool extractObjectAt(const String& json, int startPos, String& outObject) {
   if (startPos < 0 || startPos >= static_cast<int>(json.length()) || json[startPos] != '{') {
     return false;
@@ -406,24 +283,6 @@ bool extractJsonUInt64(const String& json, const char* key, uint64_t& out) {
   return true;
 }
 
-bool writeSelfRtdbHeartbeat() {
-  buildRtdbHeartbeatPayload(reusablePayload);
-  bool ok = false;
-
-  for (uint8_t attempt = 1; attempt <= AvailabilityConfig::RTDB_REQUEST_MAX_ATTEMPTS; ++attempt) {
-    ok = httpPutJson(userPath(AppConfig::USER_ID), reusablePayload, true, "SELF_HEARTBEAT");
-    if (ok) {
-      break;
-    }
-    if (attempt < AvailabilityConfig::RTDB_REQUEST_MAX_ATTEMPTS) {
-      vTaskDelay(pdMS_TO_TICKS(AvailabilityConfig::RTDB_RETRY_DELAY_MS));
-      WifiConnection::ensureConnected();
-    }
-  }
-
-  return ok;
-}
-
 void setVoipStatusFromRtdb(uint8_t userNumber, bool available, uint32_t ageSeconds, uint64_t lastSeenServerMs) {
   if (userNumber < 1 || userNumber > AvailabilityConfig::USER_COUNT) {
     return;
@@ -451,22 +310,7 @@ void markSelfVoipRecentlyWrittenIfNeeded(bool writeOk) {
   portEXIT_CRITICAL(&usersMux);
 }
 
-void readAllRtdbHeartbeats() {
-  bool ok = false;
-  for (uint8_t attempt = 1; attempt <= AvailabilityConfig::RTDB_REQUEST_MAX_ATTEMPTS; ++attempt) {
-    ok = httpGetJson(AvailabilityConfig::RTDB_USERS_PATH, reusableResponse, "USERS_READ");
-    if (ok) {
-      break;
-    }
-    if (attempt < AvailabilityConfig::RTDB_REQUEST_MAX_ATTEMPTS) {
-      vTaskDelay(pdMS_TO_TICKS(AvailabilityConfig::RTDB_RETRY_DELAY_MS));
-      WifiConnection::ensureConnected();
-    }
-  }
-  if (!ok) {
-    return;
-  }
-
+void applyRtdbHeartbeatSnapshot(const String& response) {
   uint64_t nowEpochMs = 0;
   const bool haveCurrentTime = currentEpochMs(nowEpochMs);
   const uint32_t thresholdMs = voipOfflineThresholdMs();
@@ -477,7 +321,7 @@ void readAllRtdbHeartbeats() {
 
     String userObject;
     const String key = String("user_") + id;
-    if (!extractNamedObject(reusableResponse, key.c_str(), userObject)) {
+    if (!extractNamedObject(response, key.c_str(), userObject)) {
       setVoipStatusFromRtdb(userNumber, false, UNKNOWN_AGE_SECONDS, 0);
       continue;
     }
@@ -496,6 +340,88 @@ void readAllRtdbHeartbeats() {
     const bool available = rawAgeMs <= thresholdMs;
     const uint32_t ageSeconds = static_cast<uint32_t>(rawAgeMs / 1000ULL);
     setVoipStatusFromRtdb(userNumber, available, ageSeconds, lastSeenServerMs);
+  }
+}
+
+void consumeRtdbResults() {
+  bool success = false;
+  if (RtdbRequestService::takeAvailabilityHeartbeatResult(success)) {
+    heartbeatAwaitingResult = false;
+    markSelfVoipRecentlyWrittenIfNeeded(success);
+    if (logEnabled()) {
+      Serial.printf(
+          "[Availability][HEARTBEAT_RESULT] success=%s\n",
+          success ? "true" : "false");
+    }
+  }
+
+  if (RtdbRequestService::takeAvailabilityUsersResult(success, reusableResponse)) {
+    usersReadAwaitingResult = false;
+    if (success) {
+      applyRtdbHeartbeatSnapshot(reusableResponse);
+    }
+    if (logEnabled()) {
+      Serial.printf(
+          "[Availability][USERS_RESULT] success=%s bytes=%u\n",
+          success ? "true" : "false",
+          static_cast<unsigned int>(reusableResponse.length()));
+    }
+    reusableResponse = "";
+  }
+}
+
+bool requestRetryDelayElapsed(unsigned long nowMs, unsigned long lastAttemptMs) {
+  return lastAttemptMs == 0 ||
+         (nowMs - lastAttemptMs) >= AvailabilityConfig::RTDB_RETRY_DELAY_MS;
+}
+
+void markPeriodicRtdbWorkDue(unsigned long nowMs) {
+  if (lastRtdbPeriodMs != 0 &&
+      (nowMs - lastRtdbPeriodMs) < AvailabilityConfig::PERIOD_TIME_MS) {
+    return;
+  }
+
+  lastRtdbPeriodMs = nowMs;
+  heartbeatDue = true;
+  usersReadDue = true;
+  usersReadDeferredLogged = false;
+}
+
+void scheduleDueRtdbWork(unsigned long nowMs) {
+  if (heartbeatDue && !heartbeatAwaitingResult &&
+      requestRetryDelayElapsed(nowMs, lastHeartbeatScheduleAttemptMs)) {
+    lastHeartbeatScheduleAttemptMs = nowMs;
+    buildRtdbHeartbeatPayload(reusablePayload);
+    if (RtdbRequestService::scheduleAvailabilityHeartbeat(reusablePayload.c_str())) {
+      heartbeatDue = false;
+      heartbeatAwaitingResult = true;
+    }
+  }
+
+  if (!usersReadDue || usersReadAwaitingResult) {
+    return;
+  }
+
+  const bool audioBusy =
+      RtdbRequestService::audioPriorityActive() ||
+      RtdbRequestService::audioQueueDepth() > 0;
+  if (audioBusy) {
+    if (!usersReadDeferredLogged) {
+      Serial.println("[AVAILABILITY] deferred reason=audio_busy type=users_read");
+      usersReadDeferredLogged = true;
+    }
+    return;
+  }
+
+  if (!requestRetryDelayElapsed(nowMs, lastUsersReadScheduleAttemptMs)) {
+    return;
+  }
+
+  lastUsersReadScheduleAttemptMs = nowMs;
+  if (RtdbRequestService::scheduleAvailabilityUsersRead()) {
+    usersReadDue = false;
+    usersReadAwaitingResult = true;
+    usersReadDeferredLogged = false;
   }
 }
 
@@ -637,7 +563,9 @@ bool sendEspNowPresencePacket(uint64_t slotId) {
   packet.version = 3;
   packet.userNumber = selfNumber;
   packet.logicalChannel = AvailabilityConfig::P2P_STATS_LOGICAL_CHANNEL;
-  snprintf(packet.userId, sizeof(packet.userId), "%02u", static_cast<unsigned int>(selfNumber));
+  packet.userId[0] = static_cast<char>('0' + ((selfNumber / 10U) % 10U));
+  packet.userId[1] = static_cast<char>('0' + (selfNumber % 10U));
+  packet.userId[2] = '\0';
   packet.uptimeMs = static_cast<uint32_t>(millis());
   packet.periodMs = static_cast<uint32_t>(AvailabilityConfig::PERIOD_TIME_MS);
   packet.statsWindowMs = static_cast<uint32_t>(AvailabilityConfig::P2P_STATS_SYNC_WINDOW_MS);
@@ -766,43 +694,19 @@ void initializeUsers() {
   portEXIT_CRITICAL(&usersMux);
 }
 
-void runRtdbCycle() {
-  const bool writeOk = writeSelfRtdbHeartbeat();
-  markSelfVoipRecentlyWrittenIfNeeded(writeOk);
-  vTaskDelay(pdMS_TO_TICKS(AvailabilityConfig::TASK_SHORT_YIELD_MS));
-  readAllRtdbHeartbeats();
-}
-
 void availabilityTask(void*) {
   reusablePayload.reserve(512);
-  reusableResponse.reserve(2048);
-
-  unsigned long lastRtdbCycleMs = 0;
+  reusableResponse.reserve(3072);
 
   for (;;) {
+    consumeRtdbResults();
     maybeStartTimeSync();
     runSynchronizedP2pWindowIfDue();
     updateP2pFreshness();
 
     const unsigned long nowMs = millis();
-    const bool rtdbDue = lastRtdbCycleMs == 0 ||
-                         (nowMs - lastRtdbCycleMs) >= AvailabilityConfig::PERIOD_TIME_MS;
-
-    // Avoid intentionally starting a blocking RTDB GET/PUT inside the P2P sync
-    // window. If an HTTP call runs long it may still skip a window, which is why
-    // P2P availability tolerates several missed windows before marking offline.
-    uint64_t epochMs = 0;
-    bool insideP2pWindow = false;
-    if (currentEpochMs(epochMs)) {
-      insideP2pWindow = (epochMs % AvailabilityConfig::PERIOD_TIME_MS) <
-                        AvailabilityConfig::P2P_STATS_SYNC_WINDOW_MS;
-    }
-
-    if (rtdbDue && !insideP2pWindow) {
-      lastRtdbCycleMs = millis();
-      runRtdbCycle();
-      updateP2pFreshness();
-    }
+    markPeriodicRtdbWorkDue(nowMs);
+    scheduleDueRtdbWork(nowMs);
 
     vTaskDelay(pdMS_TO_TICKS(AvailabilityConfig::TASK_LOOP_DELAY_MS));
   }
@@ -818,6 +722,14 @@ bool begin() {
   }
 
   initializeUsers();
+  heartbeatDue = true;
+  usersReadDue = true;
+  heartbeatAwaitingResult = false;
+  usersReadAwaitingResult = false;
+  usersReadDeferredLogged = false;
+  lastRtdbPeriodMs = 0;
+  lastHeartbeatScheduleAttemptMs = 0;
+  lastUsersReadScheduleAttemptMs = 0;
   maybeStartTimeSync();
   initEspNowIfNeeded();
 

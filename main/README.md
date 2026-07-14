@@ -1,125 +1,85 @@
-# View Users + synchronized background availability patch (fixed ESP-NOW channel policy)
+# ESP32 RTDB walkie-talkie
 
-This patch adds a low-priority background availability service plus a real `View users` screen.
-It is applied from the original project state, not on top of an older patch.
-
-## What changed
-
-- Added `availability_service.h/.cpp`.
-- `main.ino` starts the availability service for both Talker and Listener roles.
-- `gui.cpp/.h` now render `View users` instead of the old placeholder.
-- `app_config.h` now has per-device user identity plus availability timing configuration.
-- P2P ESP-NOW discovery now uses synchronized epoch-time windows instead of `millis()` since boot, so ESPs that start at different times do not permanently miss each other.
-- ESP-NOW presence uses the current Wi-Fi/AP channel, not a separate physical channel. This avoids `Peer channel is not equal to the home channel` errors while the ESP is connected to Wi-Fi/RTDB.
-
-## RTDB VOIP availability
-
-Each ESP periodically writes its own heartbeat to:
-
-```text
-/statistics/users/user_<id>
-```
-
-For example, user `01` writes to:
-
-```text
-/statistics/users/user_01
-```
-
-The heartbeat includes:
-
-- `userId`
-- `deviceId`
-- `roomId`
-- `lastSeenServerMs` using Firebase server timestamp
-- `deviceEpochMs` from the ESP clock after NTP sync
-- `uptimeMs`
-- `periodMs`
-- `timezone`
-- `tz`
-- `localTime`
-
-Every ESP also reads `/statistics/users` and marks a VOIP user unavailable when the last server timestamp is older than:
-
-```text
-AvailabilityConfig::PERIOD_TIME_MS * 1.1
-```
-
-Default period is 5000 ms, so the VOIP offline threshold is 5500 ms.
-
-## Synchronized P2P availability
-
-Each ESP broadcasts a compact ESP-NOW presence packet with its user number during a shared statistics window.
-The shared window is based on wall-clock epoch time:
+The same firmware runs on every ESP32. Before flashing each board, assign a
+unique identity in `app_config.h`:
 
 ```cpp
-inWindow = (epochMs % AvailabilityConfig::PERIOD_TIME_MS) <
-           AvailabilityConfig::P2P_STATS_SYNC_WINDOW_MS;
+constexpr const char* DEVICE_ID = "esp32-02";
+constexpr const char* USER_ID = "02";
 ```
 
-Because this uses NTP-synchronized epoch time instead of `millis()` since boot, user `01` and user `02` enter the stats window at the same global time even if they booted at different moments.
+The audio path is half duplex. Pressing PTT pauses the local SSE listener,
+creates this ESP's RTDB session, captures and uploads microphone chunks, drains
+the bounded upload queue, closes the session, and resumes listening.
 
-Important ESP32 Wi-Fi/ESP-NOW constraint: while the ESP is connected to a Wi-Fi router, the radio is homed to the router/AP channel. ESP-NOW sends must use that same physical channel. Configuring a different peer channel causes logs like:
+## RTDB layout
+
+Each device owns a separate subtree:
 
 ```text
-ESPNOW: Peer channel is not equal to the home channel, send fail!
+/rooms/<room>/channels/ch01/talkers/esp32-01/live/meta
+/rooms/<room>/channels/ch01/talkers/esp32-01/live/chunks/<sequence>
+/rooms/<room>/channels/ch01/talkers/esp32-02/live/meta
+/rooms/<room>/channels/ch01/talkers/esp32-02/live/chunks/<sequence>
 ```
 
-Therefore this patch does **not** switch to a separate physical stats channel. It keeps ESP-NOW on the current Wi-Fi channel and separates traffic using:
-
-- a dedicated packet magic/version
-- `P2P_STATS_LOGICAL_CHANNEL` inside the packet
-- synchronized stats windows
-- repeated short beacons
-- per-user transmit offsets
-
-Relevant defaults:
-
-```cpp
-AvailabilityConfig::P2P_ESPNOW_CURRENT_WIFI_CHANNEL = 0; // current AP/home channel
-AvailabilityConfig::P2P_STATS_LOGICAL_CHANNEL = 250;
-AvailabilityConfig::P2P_STATS_SYNC_WINDOW_MS = 300;
-AvailabilityConfig::P2P_STATS_BROADCAST_REPEATS = 3;
-AvailabilityConfig::P2P_STATS_BROADCAST_GAP_MS = 35;
-AvailabilityConfig::P2P_STATS_USER_TX_OFFSET_STEP_MS = 35;
-```
-
-The per-user offset spreads transmissions inside the same window. For example, user `01` transmits around 35 ms into the window, user `02` around 70 ms, and so on.
-
-P2P availability is intentionally less strict than VOIP availability. It is marked unavailable only after several missed synchronized windows:
-
-```cpp
-AvailabilityConfig::P2P_OFFLINE_AFTER_MISSED_PERIODS = 3;
-```
-
-This prevents the GUI from flickering when one ESP-NOW packet is lost.
-
-All ESPs that should discover each other over ESP-NOW must be on the same Wi-Fi/AP channel. The easiest way is to connect them to the same router/hotspot.
-
-## Device setup
-
-Before uploading to each ESP, change these in `app_config.h`:
-
-```cpp
-constexpr const char* DEVICE_ID = "esp32-Talker-01";
-constexpr const char* USER_ID = "01";
-```
-
-Use IDs `01` through `05` for the five assumed users.
-
-## View users screen
-
-The screen displays five users:
+Transmitters never write the same RTDB node, so no shared channel-lock mechanism is used.
+The listener opens one SSE stream on:
 
 ```text
-U01 V:ON P:--
-U02 V:-- P:ON
-...
+/rooms/<room>/channels/ch01/talkers
 ```
 
-- `V` = VOIP/RTDB availability
-- `P` = P2P/ESP-NOW availability
-- Left button returns to the main menu
-- Right button forces a redraw
+If multiple remote ESPs talk simultaneously, a listener plays the first session
+from which it receives a chunk and ignores the others until that session ends or
+times out.
 
-The GUI is updated from a small static snapshot every `AvailabilityConfig::GUI_REFRESH_MS` milliseconds. No dynamic list allocation or queues are used for availability state.
+Audio is 8 kHz mono signed 16-bit PCM, split into 200 ms chunks and Base64
+encoded.
+
+## Request and memory model
+
+- One RTDB request task serializes session control and audio writes.
+- `SESSION_START` is processed before queued audio and authorizes only the
+  matching channel/session.
+- Microphone PCM is stored in ten fixed blocks; the FreeRTOS queue contains only
+  block indices.
+- Audio JSON is assembled in one fixed static buffer.
+- One persistent HTTPS connection is reused for all chunks in a PTT session.
+- The persistent audio connection is closed before `SESSION_END`.
+- Completed chunk nodes are deleted at session end so SSE reconnect snapshots
+  stay small.
+- The receiver decodes Base64 directly from the existing SSE event buffer.
+
+Chunk nodes are intentionally temporary. They may be visible in the Firebase
+console while PTT is held or uploads are draining, but a successful session end
+removes them and leaves only inactive metadata.
+
+## Availability status
+
+Availability remains disabled:
+
+```cpp
+namespace AvailabilityConfig {
+constexpr bool ENABLED = false;
+}
+```
+
+With this setting, the availability task, NTP setup, ESP-NOW presence flow,
+low-priority RTDB queue/mutex, heartbeat writes, user reads, and response buffer
+reservation are not started.
+
+Do not enable Availability until its earlier crash has been diagnosed separately.
+
+## First V4 flash
+
+Delete the existing test subtree once before the first V4 test so stale chunk
+history from older firmware does not appear in the initial SSE snapshot:
+
+```text
+/rooms/room1/channels/ch01/talkers
+```
+
+Then flash both boards with different `DEVICE_ID` and `USER_ID` values.
+
+See `VALIDATION.md` for the bench procedure and expected logs.

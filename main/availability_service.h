@@ -12,6 +12,8 @@ struct UserStatus {
   uint32_t p2pAgeSeconds = 0;   // UINT32_MAX when unknown
 };
 
+// Starts NTP/ESP-NOW maintenance and asynchronous, low-priority RTDB
+// availability scheduling. The RTDB request service must be started first.
 bool begin();
 bool isRunning();
 

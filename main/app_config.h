@@ -4,19 +4,9 @@
 
 namespace AppConfig {
 
-// Compile/upload the same code twice, changing only this value:
-// - Talker:   reads microphone chunks and uploads them to RTDB while MAIN_BUTTON is held.
-// - Listener: continuously listens to the RTDB chunk buffer and plays new chunks.
-enum class DeviceRole : uint8_t {
-  Talker,
-  Listener,
-};
-
-constexpr DeviceRole ROLE = DeviceRole::Talker;
-
 constexpr uint8_t DEFAULT_CHANNEL = 1;
 constexpr const char* ROOM_ID = "room1";
-constexpr const char* DEVICE_ID = "esp32-Talker-02";
+constexpr const char* DEVICE_ID = "esp32-02";
 
 // Logical project user id. Compile/upload the same code to each ESP after
 // changing only this value and DEVICE_ID, for example: "01" ... "05".
@@ -27,8 +17,8 @@ constexpr const char* USER_ID = "02";
 namespace WifiConfig {
 
 // Fill locally before uploading. Do not commit real Wi-Fi credentials.
-constexpr const char* SSID = "Adi";
-constexpr const char* PASSWORD = "0502092099";
+constexpr const char* SSID = "ICST";
+constexpr const char* PASSWORD = "arduino123";
 
 constexpr unsigned long CONNECT_TIMEOUT_MS = 20000;
 constexpr unsigned long RECONNECT_INTERVAL_MS = 5000;
@@ -48,14 +38,13 @@ constexpr const char* DATABASE_URL =
 
 namespace AvailabilityConfig {
 
+constexpr bool ENABLED = false;
 constexpr uint8_t USER_COUNT = 5;
 
-// Background availability period. The GUI marks a VOIP user offline when the
-// last RTDB heartbeat is older than PERIOD_TIME_MS * 1.1. P2P is intentionally
-// less strict: one missed ESP-NOW stats window should not make the GUI flicker.
+// Background availability period. Both transports tolerate missed periods so
+// a delayed, serialized RTDB request does not make the GUI flicker.
 constexpr unsigned long PERIOD_TIME_MS = 5000;
-constexpr uint8_t VOIP_OFFLINE_THRESHOLD_NUMERATOR = 11;
-constexpr uint8_t VOIP_OFFLINE_THRESHOLD_DENOMINATOR = 10;
+constexpr uint8_t VOIP_OFFLINE_AFTER_MISSED_PERIODS = 3;
 constexpr uint8_t P2P_OFFLINE_AFTER_MISSED_PERIODS = 3;
 
 constexpr const char* RTDB_USERS_PATH = "/statistics/users";
@@ -68,6 +57,7 @@ constexpr const char* TIME_ZONE_POSIX = "IST-2IDT,M3.4.4/26,M10.5.0";
 constexpr const char* NTP_SERVER_1 = "pool.ntp.org";
 constexpr const char* NTP_SERVER_2 = "time.nist.gov";
 constexpr unsigned long TIME_SYNC_CHECK_MS = 30000;
+constexpr uint32_t CLOCK_VALID_EPOCH_SECONDS = 1700000000UL;
 
 // ESP-NOW physical channel policy.
 //
@@ -108,7 +98,7 @@ constexpr unsigned long TASK_SHORT_YIELD_MS = 20;
 constexpr unsigned long TASK_LOOP_DELAY_MS = 20;
 constexpr unsigned long GUI_REFRESH_MS = 500;
 
-constexpr bool LOG_AVAILABILITY = true;
+constexpr bool LOG_AVAILABILITY = false;
 
 }  // namespace AvailabilityConfig
 
@@ -139,18 +129,64 @@ constexpr unsigned long STREAM_RECONNECT_INTERVAL_MS = 3000;
 
 namespace RtdbUploadConfig {
 
-// Upload runs in a separate FreeRTOS task so recording does not wait for HTTPS.
-// Queue length 24 covers about 4.8 seconds of 200 ms chunks even if the network
-// temporarily stalls. Keep an eye on free heap in the startup log before raising it.
-constexpr uint8_t TX_QUEUE_LENGTH = 24;
-constexpr uint8_t UPLOAD_BATCH_MAX_CHUNKS = 6;
+// Ten fixed blocks cover two seconds of 200 ms audio without placing full PCM
+// arrays inside a FreeRTOS queue. One chunk is sent per persistent HTTP PATCH.
+constexpr uint8_t TX_QUEUE_LENGTH = 10;
+constexpr uint8_t UPLOAD_BATCH_MAX_CHUNKS = 1;
+constexpr uint32_t BATCH_COLLECTION_WINDOW_MS = 300;
 constexpr uint8_t UPLOAD_MAX_ATTEMPTS = 2;
 constexpr unsigned long UPLOAD_RETRY_DELAY_MS = 250;
+// Persistent audio PATCH response budget. Audio uses one TLS connection per
+// PTT session instead of reconnecting for every 200 ms chunk.
+constexpr uint32_t UPLOAD_RESPONSE_TIMEOUT_MS = 5000;
 constexpr uint32_t UPLOAD_TASK_STACK_BYTES = 16384;
 constexpr uint8_t UPLOAD_TASK_PRIORITY = 1;
 constexpr uint8_t UPLOAD_TASK_CORE = 1;
 
 }  // namespace RtdbUploadConfig
+
+
+namespace RtdbRequestConfig {
+
+constexpr uint8_t HIGH_QUEUE_LENGTH = 6;
+constexpr uint8_t LOW_QUEUE_LENGTH = 2;
+constexpr uint8_t CONTROL_SLOT_COUNT = 4;
+// Short REST operations use bounded connect and response budgets. Callers wait
+// longer than the configured retry sequence without owning request memory.
+constexpr uint16_t SHORT_HTTP_TIMEOUT_MS = 3000;
+constexpr int32_t SHORT_CONNECT_TIMEOUT_MS = 3000;
+constexpr uint32_t TASK_STACK_BYTES = 20480;
+constexpr uint8_t TASK_PRIORITY = 2;
+constexpr uint8_t TASK_CORE = 0;
+constexpr uint32_t TASK_IDLE_DELAY_MS = 10;
+constexpr uint32_t SYNC_OPERATION_TIMEOUT_MS = 60000;
+
+}  // namespace RtdbRequestConfig
+
+namespace PlaybackConfig {
+
+constexpr uint8_t BLOCK_COUNT = 5;
+constexpr uint8_t QUEUE_LENGTH = 4;
+constexpr uint32_t TASK_STACK_BYTES = 6144;
+constexpr uint8_t TASK_PRIORITY = 1;
+constexpr uint8_t TASK_CORE = 1;
+
+}  // namespace PlaybackConfig
+
+namespace CommunicationConfig {
+
+constexpr uint32_t TASK_STACK_BYTES = 8192;
+constexpr uint8_t TASK_PRIORITY = 2;
+constexpr uint8_t TASK_CORE = 1;
+constexpr uint32_t LOOP_DELAY_MS = 10;
+constexpr uint32_t PLAYBACK_STOP_TIMEOUT_MS = 1000;
+// Guarantee one microphone block for quick PTT presses while SESSION_START is
+// still completing. Normal held transmissions are unaffected.
+constexpr uint32_t INITIAL_CAPTURE_GRACE_MS = 750;
+constexpr uint32_t UPLOAD_DRAIN_TIMEOUT_MS = 30000;
+constexpr uint32_t REMOTE_TALKER_IDLE_TIMEOUT_MS = 2500;
+
+}  // namespace CommunicationConfig
 
 namespace AudioConfig {
 
