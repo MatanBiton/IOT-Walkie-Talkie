@@ -1,7 +1,7 @@
 # Walkie-Talkie Project — Group 14
 Group members: Erel Hadad, Sapir Kvetny, Matan Biton  
 
-Advisors: Rami Abu Much
+Advisors: Rami Abu Much, Tom Sofer
 ## Details about the project
 
 A half-duplex ESP32 walkie-talkie with channel selection through an OLED interface. Audio is transmitted through Firebase Realtime Database in **VoIP mode** and can fall back to **ESP-NOW P2P mode** after repeated upload failures. The system also provides user-availability checks, adjustable audio settings, communication-status feedback, and a companion Flutter application.
@@ -17,15 +17,35 @@ Before flashing each ESP32, configure its unique `DEVICE_ID` and `USER_ID`, Wi-F
 
 ## ESP32 SDK version used in this project
 
-* **ESP32 Arduino Core by Espressif Systems:** `TODO: add installed version`
+* **ESP32 Arduino Core by Espressif Systems:** `2.0.17`
 
 ## Arduino/ESP32 libraries used in this project
 
 * **FirebaseClient by Mobizt** — version **2.2.13** or a compatible 2.2.x release.
-* **ESP_SSLClient** — `TODO: add installed version`.
-* **Adafruit GFX Library** — `TODO: add installed version`.
-* **Adafruit SSD1306** — `TODO: add installed version`.
+* **ESP_SSLClient** — **3.1.3**.
+* **Adafruit GFX Library** — **1.12.6**.
+* **Adafruit SSD1306** — **2.5.17**.
 * **WiFi, Wire, ESP-NOW, I2S, FreeRTOS and mbedTLS** — included with the ESP32 Arduino Core.
+
+## Hardware list
+
+Quantities below are for **one Walkie-Talkie device**.
+
+|  Quantity | Component                                      | Purpose                                            |
+| --------: | ---------------------------------------------- | -------------------------------------------------- |
+|         1 | ESP32 development board                        | Main controller, Wi-Fi and ESP-NOW communication   |
+|         1 | INMP441 I2S microphone                         | Captures voice input                               |
+|         1 | max98357 audio DAC amplifier                   | Drives the speaker                                 |
+|         1 | Speaker                                        | Plays received audio                               |
+|         1 | 128×64 SSD1306 I2C OLED display                | Displays channels, status, settings and statistics |
+|         3 | Momentary push buttons                         | PTT, left navigation and right navigation          |
+|         1 | LED                                            | Indicates recording and pending communication work |
+|         1 | LED current-limiting resistor                  | Protects the status LED                            |
+|         1 | USB cable and suitable USB power source        | Programs and powers the ESP32                      |
+| As needed | Breadboard, perfboard or custom mounting board | Holds and connects the components                  |
+| As needed | Jumper wires / hookup wire                     | Electrical connections                             |
+|     1 set | 3D-printed enclosure parts                     | Houses the completed device                        |
+
 
 ## Connection diagram
 
