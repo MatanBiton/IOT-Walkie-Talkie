@@ -1,5 +1,6 @@
 # Walkie-Talkie Project — Group 14
-
+Group members: Erel Hadad, Sapir Kvetny, Matan Biton
+Advisors: Rami Abu Much
 ## Details about the project
 
 A half-duplex ESP32 walkie-talkie with channel selection through an OLED interface. Audio is transmitted through Firebase Realtime Database in **VoIP mode** and can fall back to **ESP-NOW P2P mode** after repeated upload failures. The system also provides user-availability checks, adjustable audio settings, communication-status feedback, and a companion Flutter application.
