@@ -1,5 +1,6 @@
 # Walkie-Talkie Project — Group 14
-Group members: Erel Hadad, Sapir Kvetny, Matan Biton
+Group members: Erel Hadad, Sapir Kvetny, Matan Biton  
+
 Advisors: Rami Abu Much
 ## Details about the project
 
