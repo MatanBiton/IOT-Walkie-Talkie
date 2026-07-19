@@ -40,7 +40,7 @@ Before flashing each ESP32, configure its unique `DEVICE_ID` and `USER_ID`, Wi-F
 
 The buttons use `INPUT_PULLUP`, so a pressed button reads `LOW`. GPIO 15 and GPIO 5 are configured as outputs and held `LOW` to act as virtual grounds.
 
-![Connection diagram](Documentation/connection-diagram.png)
+![Connection diagram](Documentation/Walki-Talkie_Diagram.png)
 
 ## Project Poster
 
