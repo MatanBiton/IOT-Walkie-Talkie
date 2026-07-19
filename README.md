@@ -13,7 +13,6 @@ Before flashing each ESP32, configure its unique `DEVICE_ID` and `USER_ID`, Wi-F
 * `ESP32/`: ESP32 firmware source code.
 * `Documentation/`: wiring diagram, Fritzing connection diagram file and basic operating instructions.
 * `Unit Tests/`: tests for individual input and output hardware components.
-* `Parameters/`: descriptions of configurable firmware parameters and settings.
 * `assets/`: project poster.
 
 ## ESP32 SDK version used in this project
